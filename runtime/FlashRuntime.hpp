@@ -183,6 +183,7 @@ struct Movie {
 };
 
 class Clip;
+bool clipAlive(const Clip* c); // debugging aid (FP_TRACE_STACK)
 struct Player;
 
 std::string stripHtml(const std::string& html); // text content of an HTML text field value
@@ -209,6 +210,8 @@ struct DisplayObject : std::enable_shared_from_this<DisplayObject> {
     std::uint16_t clipDepth{}, ratio{};
     std::uint8_t blendMode = 0; // SWF blend mode; 0/1 normal
     bool visible = true;
+    bool hasScroll = false;        // scrollRect set: contents are cropped to scroll[2] x scroll[3] and shifted by scroll[0], scroll[1] (pixels)
+    float scroll[4] = {0, 0, 0, 0};
     bool dynamic = false;          // created by script (attachMovie...): survives timeline gotos
     bool dynamicTransform = false; // transformed by script: the timeline no longer moves it (Flash behaviour)
     std::string name;
@@ -227,7 +230,8 @@ struct DisplayObject : std::enable_shared_from_this<DisplayObject> {
 // A MovieClip instance: owns a display list and a play head.
 class Clip {
 public:
-    Clip(Player& player, const TimelineDef& timeline, std::uint32_t id, DisplayObject* holder);
+    Clip(Player& player, const TimelineDef& timeline, std::uint32_t id, DisplayObject* holder, bool start = true);
+    void start() { if (!timeline_.frames.empty()) enterFrame(0, true); } // first frame (when built with start=false)
     ~Clip();
     Clip(const Clip&) = delete;
     Clip& operator=(const Clip&) = delete;
@@ -386,6 +390,7 @@ private:
     using ChildIt = std::map<int, std::shared_ptr<DisplayObject>>::const_iterator;
     void drawMasked(const DisplayObject& mask, ChildIt first, ChildIt last, const Matrix& m, const ColorTransform& cx);
     void drawObject(const DisplayObject& obj, const Matrix& m, const ColorTransform& cx);
+    void drawScrolled(const DisplayObject& obj, const Matrix& m, const ColorTransform& cx);
     void drawCharacter(std::uint16_t character, const Clip* clip, const DisplayObject* obj, const Matrix& m,
                        const ColorTransform& cx);
     void drawShape(const ShapeDef& shape, const Matrix& m, const ColorTransform& cx);

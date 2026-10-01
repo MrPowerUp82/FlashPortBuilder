@@ -62,7 +62,8 @@ const Trait* TraitTable::find(const Multiname& mn) const {
         // Interface methods are named in the interface's own namespace ("pkg:IFoo"); an implementing
         // class provides them under the same local name in its public namespace.
         for (const auto& ns : mn.nss) {
-            if (ns.kind == NsKind::Private || ns.uri.find(':') == std::string::npos) continue;
+            // ("IFoo" for interfaces in the unnamed package).
+            if (ns.kind == NsKind::Private || ns.uri.empty() || ns.uri.compare(0, 7, "http://") == 0) continue;
             for (auto it = range.first; it != range.second; ++it) {
                 const Trait& t = traits[it->second];
                 if (t.ns.kind == NsKind::Public && t.ns.uri.empty() && (t.kind == Trait::Kind::Method || t.kind == Trait::Kind::Accessor)) return &t;

@@ -347,8 +347,10 @@ bool isIndex(const std::string& s, std::size_t& idx) {
 std::string keyName(VM& vm, const Multiname& mn, const Value* key) { return key ? vm.toString(*key) : mn.name; }
 
 // Query shared by XML (one node) and XMLList (several): attribute, child or index access.
-bool queryNodes(VM& vm, const std::vector<NodePtr>& nodes, bool isList, const Multiname& mn, const Value* key, Value& out) {
-    const std::string name = keyName(vm, mn, key);
+bool queryNodes(VM& vm, const std::vector<NodePtr>& nodes, bool isList, const Multiname& mn0, const Value* key, Value& out) {
+    std::string name = keyName(vm, mn0, key);
+    Multiname mn = mn0;
+    if (key && !name.empty() && name[0] == '@') { mn.attribute = true; name.erase(0, 1); } // xml["@id"], "@id" in xml
     std::size_t idx;
     if (isIndex(name, idx)) {
         if (isList) out = idx < nodes.size() ? wrap(vm, nodes[idx]) : Value();

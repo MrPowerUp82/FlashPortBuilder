@@ -1131,10 +1131,32 @@ void installFlashImpl(VM& vm) {
         return Value();
     });
     // Accepted but not rendered.
-    for (const char* stored : {"filters", "cacheAsBitmap", "mask", "scrollRect", "opaqueBackground", "scale9Grid", "accessibilityProperties"}) {
+    // scrollRect crops the contents to the rectangle and shifts them by its corner (a camera).
+    dob.property("scrollRect",
+        [](VM&, const Value& s, Args&) { Value* v = s.isObject() ? s.o->dynamic.find("__scrollRect") : nullptr; return v ? *v : Value::null(); },
+        [](VM& vm, const Value& s, Args& a) {
+            if (!s.isObject()) return Value();
+            s.o->dynamic.set("__scrollRect", arg(a, 0));
+            if (auto* d = disp(s)) {
+                const Value r = arg(a, 0);
+                d->hasScroll = r.isObject();
+                if (d->hasScroll) {
+                    d->scroll[0] = float(vm.toNumber(vm.getPublic(r, "x")));
+                    d->scroll[1] = float(vm.toNumber(vm.getPublic(r, "y")));
+                    d->scroll[2] = float(vm.toNumber(vm.getPublic(r, "width")));
+                    d->scroll[3] = float(vm.toNumber(vm.getPublic(r, "height")));
+                }
+            }
+            return Value();
+        });
+    for (const char* stored : {"filters", "cacheAsBitmap", "mask", "opaqueBackground", "scale9Grid", "accessibilityProperties"}) {
         const std::string key = std::string("__") + stored;
         dob.property(stored,
-            [key](VM&, const Value& s, Args&) { Value* v = s.isObject() ? s.o->dynamic.find(key) : nullptr; return v ? *v : Value::null(); },
+            [key, stored](VM& vm, const Value& s, Args&) {
+                Value* v = s.isObject() ? s.o->dynamic.find(key) : nullptr;
+                if (v) return *v;
+                return std::string_view(stored) == "filters" ? Value(vm.newArray()) : Value::null();
+            },
             [key](VM&, const Value& s, Args& a) { if (s.isObject()) s.o->dynamic.set(key, arg(a, 0)); return Value(); });
     }
     dob.getter("loaderInfo", [](VM& vm, const Value&, Args&) {
@@ -1243,7 +1265,10 @@ void installFlashImpl(VM& vm) {
     };
     auto removeChild = [](VM& vm, const Value& self, DisplayObject* cd) -> Value {
         Clip* c = clipOfValue(vm, self);
-        if (!c || !cd || cd->parent != c) vm.throwError("ArgumentError", "The supplied DisplayObject must be a child of the caller.");
+        if (!c || !cd || cd->parent != c) {
+            if (std::getenv("FP_TRACE_STACK")) std::fprintf(stderr, "[removeChild] alive=%d self=%p disp=%p kind=%d char=%u holderClip=%p cls=%s childParent=%p\n", int(cd && cd->parent && clipAlive(cd->parent)), (void*)c, (void*)disp(self), disp(self) ? int(disp(self)->kind) : -1, disp(self) ? unsigned(disp(self)->character) : 0u, disp(self) ? (void*)disp(self)->clip.get() : nullptr, self.isObject() && self.o->cls ? self.o->cls->name.c_str() : "?", cd ? (void*)cd->parent : nullptr);
+            vm.throwError("ArgumentError", "The supplied DisplayObject must be a child of the caller.");
+        }
         auto keep = cd->shared_from_this();
         Value childV(vm.objectFor(*cd));
         vm.dispatchEvent(childV.o, vm.makeEvent("flash.events::Event", "removed", true));
@@ -1759,8 +1784,15 @@ void installFlashImpl(VM& vm) {
             auto info = vm.getPublic(s, "contentLoaderInfo");
             if (!vm.player.loadSwf(url, domain, loaded, err)) {
                 vm.warnOnce("Loader.load: " + err);
-                failLater(vm, info.o);
-                return Value();
+                const bool swf = url.size() > 4 && url.compare(url.size() - 4, 4, ".swf") == 0 && url.find("://") == std::string::npos;
+                if (!swf) {
+                    failLater(vm, info.o);
+                    return Value();
+                }
+                // A SWF missing from the bundle: deliver an empty movie so the game's loading sequence
+                // can finish (it would otherwise wait for a file that never arrives).
+                loaded.base = 0xffff;
+                loaded.domain = 0;
             }
             info.o->dynamic.set("__url", Value(url));
             info.o->dynamic.set("__loader", s);
@@ -2315,6 +2347,18 @@ void installFlashImpl(VM& vm) {
         auto c = vm.defineNativeClass("flash.filters", n, bitmapFilter);
         c->sealed = false;
         ClassBuilder{vm, c}.method("clone", [](VM&, const Value& s, Args&) { return s; });
+        if (std::string_view(n) == "ColorMatrixFilter") {
+            ClassBuilder{vm, c}.ctor([](VM& vm, const Value& s, Args& a) {
+                Value m = arg(a, 0);
+                if (!m.isObject()) {
+                    std::vector<Value> id(20, Value(0));
+                    for (int i : {0, 6, 12, 18}) id[i] = Value(1);
+                    m = Value(vm.newArray(std::move(id)));
+                }
+                s.o->dynamic.set("matrix", m);
+                return Value();
+            });
+        }
     }
     auto quality = vm.defineNativeClass("flash.filters", "BitmapFilterQuality", obj);
     ClassBuilder{vm, quality}.constant("LOW", Value(1)).constant("MEDIUM", Value(2)).constant("HIGH", Value(3));

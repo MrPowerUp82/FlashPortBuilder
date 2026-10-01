@@ -333,14 +333,21 @@ bool Movie::load(const std::string& path, std::string& error) {
 
 // ---------------------------------------------------------------- Clip
 
-Clip::Clip(Player& player, const TimelineDef& timeline, std::uint32_t id, DisplayObject* holder)
+std::set<const Clip*> g_liveClips;
+bool clipAlive(const Clip* c) { return g_liveClips.count(c) != 0; }
+
+Clip::Clip(Player& player, const TimelineDef& timeline, std::uint32_t id, DisplayObject* holder, bool start)
     : player_(player), timeline_(timeline), id_(id), holder_(holder), bornTick_(player.tick) {
-    if (timeline_.frames.empty()) return;
-    enterFrame(0, true);
+    g_liveClips.insert(this);
+    if (start) this->start();
 }
 
 Clip::~Clip() {
+    g_liveClips.erase(this);
     if (object_) object_->clip = nullptr;
+    if (std::getenv("FP_TRACE_CLIPDEL")) std::fprintf(stderr, "[clipdel] clip=%p holder=%p char=%u children=%zu\n", (void*)this, (void*)holder_, unsigned(id_), children_.size());
+    // Children kept alive by script must not point at a dead parent.
+    for (auto& [depth, child] : children_) if (child && child->parent == this) child->parent = nullptr;
     if (streamHandle_ > 0) player_.audio.stop(streamHandle_);
 }
 
@@ -483,7 +490,9 @@ void Player::setupDisplay(DisplayObject& obj, std::uint16_t character, Clip* par
         obj.text = et->second.text;
     } else if (auto it = movie.timelines.find(character); it != movie.timelines.end() && character != 0) {
         obj.kind = DisplayObject::Kind::Sprite;
-        obj.clip = std::make_unique<Clip>(*this, it->second, character, &obj);
+        // The clip must be reachable from its holder before frame 1 runs: scripts executing in it look it up.
+        obj.clip = std::make_unique<Clip>(*this, it->second, character, &obj, false);
+        obj.clip->start();
     } else if (auto bt = movie.buttons.find(character); bt != movie.buttons.end()) {
         obj.kind = DisplayObject::Kind::Button;
         for (const auto& rec : bt->second.records) {
@@ -1337,10 +1346,12 @@ void Player::mouseButton(bool down) {
 // one makes its nearest interactive container the target. `hitSomething` reports any hit.
 DisplayObject* Player::as3HitTest(Clip& clip, const Matrix& m, float x, float y, bool& hitSomething) {
     hitSomething = false;
+    bool shapeHit = false;
     for (auto it = clip.children_.rbegin(); it != clip.children_.rend(); ++it) {
         DisplayObject& obj = *it->second;
         if (!obj.visible || obj.clipDepth > 0) continue;
-        const Matrix om = m * obj.matrix;
+        Matrix om = m * obj.matrix;
+        if (obj.hasScroll) { Matrix shift; shift.tx = -obj.scroll[0] * 20; shift.ty = -obj.scroll[1] * 20; om = om * shift; }
         if (Clip* c = clipOf(&obj)) {
             bool childHit = false;
             DisplayObject* inner = as3HitTest(*c, om, x, y, childHit);
@@ -1365,8 +1376,11 @@ DisplayObject* Player::as3HitTest(Clip& clip, const Matrix& m, float x, float y,
             }
             continue;
         }
-        if (geometry.hit(obj, m, x, y, true, false)) { hitSomething = true; return nullptr; }
+        // Plain artwork (shadows, vignettes) does not shield interactive siblings beneath it: keep
+        // looking and fall back to the container only when nothing interactive is found.
+        if (geometry.hit(obj, m, x, y, true, false)) shapeHit = true;
     }
+    if (shapeHit) hitSomething = true;
     return nullptr;
 }
 
@@ -1534,11 +1548,38 @@ void Renderer::drawObject(const DisplayObject& obj, const Matrix& m, const Color
     if (obj.blendMode > 1) {
         const SDL_BlendMode saved = activeBlend_;
         activeBlend_ = blendFor(obj.blendMode);
-        drawCharacter(obj.character, obj.clip.get(), &obj, m * obj.matrix, c);
+        if (obj.hasScroll) drawScrolled(obj, m, c);
+        else drawCharacter(obj.character, obj.clip.get(), &obj, m * obj.matrix, c);
         activeBlend_ = saved;
         return;
     }
+    if (obj.hasScroll) { drawScrolled(obj, m, c); return; }
     drawCharacter(obj.character, obj.clip.get(), &obj, m * obj.matrix, c);
+}
+
+void Renderer::drawScrolled(const DisplayObject& obj, const Matrix& m, const ColorTransform& c) {
+    // scrollRect: show the part of the contents inside the rectangle, with its corner at the origin.
+    const Matrix local = m * obj.matrix;
+    float x0, y0, x1, y1;
+    local.apply(0, 0, x0, y0);
+    local.apply(obj.scroll[2] * 20, obj.scroll[3] * 20, x1, y1);
+    SDL_Rect rect{static_cast<int>(std::floor(std::min(x0, x1))), static_cast<int>(std::floor(std::min(y0, y1))), 0, 0};
+    rect.w = static_cast<int>(std::ceil(std::max(x0, x1))) - rect.x;
+    rect.h = static_cast<int>(std::ceil(std::max(y0, y1))) - rect.y;
+    SDL_Rect previous{};
+    const bool hadClip = SDL_RenderIsClipEnabled(sdl_) == SDL_TRUE;
+    if (hadClip) {
+        SDL_RenderGetClipRect(sdl_, &previous);
+        SDL_Rect inter;
+        if (!SDL_IntersectRect(&rect, &previous, &inter)) return;
+        rect = inter;
+    }
+    SDL_RenderSetClipRect(sdl_, &rect);
+    Matrix shift;
+    shift.tx = -obj.scroll[0] * 20;
+    shift.ty = -obj.scroll[1] * 20;
+    drawCharacter(obj.character, obj.clip.get(), &obj, local * shift, c);
+    SDL_RenderSetClipRect(sdl_, hadClip ? &previous : nullptr);
 }
 
 bool Renderer::renderToPixels(const DisplayObject& obj, const Matrix& m, int w, int h, std::vector<std::uint32_t>& out) {

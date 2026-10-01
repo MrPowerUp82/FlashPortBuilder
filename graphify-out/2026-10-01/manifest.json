@@ -66,9 +66,9 @@
     "semantic_hash": ""
   },
   "include/flashport/MoviePack.hpp": {
-    "mtime": 1790793271.7086153,
-    "seen": 1790793606.2283657,
-    "ast_hash": "1d972f0384db95f28f5a512e426efca9",
+    "mtime": 1790855415.318003,
+    "seen": 1790856567.2735853,
+    "ast_hash": "9999e97902397108cd770dfd52391a8d",
     "semantic_hash": ""
   },
   "include/flashport/ProjectGenerator.hpp": {
@@ -114,21 +114,21 @@
     "semantic_hash": ""
   },
   "runtime/AVM1.cpp": {
-    "mtime": 1790854953.3980289,
-    "seen": 1790855201.0030444,
-    "ast_hash": "1c47543facb985895335a8be16221183",
+    "mtime": 1790855632.537862,
+    "seen": 1790856567.2735977,
+    "ast_hash": "3672f49244dbf3dc4eb83c4a46c69031",
     "semantic_hash": ""
   },
   "runtime/AVM1.hpp": {
-    "mtime": 1790854953.3771656,
-    "seen": 1790855201.0030453,
-    "ast_hash": "29cd93b3ab84636f8c256887e0d07e3c",
+    "mtime": 1790855632.525656,
+    "seen": 1790856567.2735994,
+    "ast_hash": "a8ccb3d53cca659b9a71e4f0fb7f4262",
     "semantic_hash": ""
   },
   "runtime/AVM1Builtins.cpp": {
-    "mtime": 1790854723.2654305,
-    "seen": 1790855201.0030465,
-    "ast_hash": "e5f37d27017b00f9284d70c9b863a30a",
+    "mtime": 1790855632.5271723,
+    "seen": 1790856567.273601,
+    "ast_hash": "6cd305920dca762557457a4c8e87733b",
     "semantic_hash": ""
   },
   "runtime/AVM1Clip.cpp": {
@@ -162,33 +162,33 @@
     "semantic_hash": ""
   },
   "runtime/AVM2Flash.cpp": {
-    "mtime": 1790768779.2747054,
-    "seen": 1790793606.2283776,
-    "ast_hash": "f19a01de3e3e22d3b2685992948fc92c",
+    "mtime": 1790855805.2355285,
+    "seen": 1790856567.2736094,
+    "ast_hash": "97f13d255aa841fc9cb5d103fdf68197",
     "semantic_hash": ""
   },
   "runtime/FlashRuntime.cpp": {
-    "mtime": 1790854953.399028,
-    "seen": 1790855201.003053,
-    "ast_hash": "a0c0acde9b90ef8392bd89a0e0ce8ac1",
+    "mtime": 1790856076.5124314,
+    "seen": 1790856567.2736142,
+    "ast_hash": "0acec6ac6872393f399ba7d7034d18c1",
     "semantic_hash": ""
   },
   "runtime/FlashRuntime.hpp": {
-    "mtime": 1790795892.858327,
-    "seen": 1790855201.0030541,
-    "ast_hash": "2b75b2c3d258f6777f3594dd270385cc",
+    "mtime": 1790856076.5134275,
+    "seen": 1790856567.2736154,
+    "ast_hash": "1f4b77b52251d13f17dd47c42963936a",
     "semantic_hash": ""
   },
   "runtime/main.cpp": {
-    "mtime": 1790769631.7021167,
-    "seen": 1790793606.2283797,
-    "ast_hash": "5e3e389a9c48f3a57931e1aa9be1b64d",
+    "mtime": 1790855695.1163201,
+    "seen": 1790856567.2736166,
+    "ast_hash": "b8b05438bae04907b6c15161a2a3e6c4",
     "semantic_hash": ""
   },
   "src/assets/AssetExtractor.cpp": {
-    "mtime": 1790795607.7088637,
-    "seen": 1790855201.0030556,
-    "ast_hash": "5fe4354c76389a2a844559105b015aa1",
+    "mtime": 1790855351.7627456,
+    "seen": 1790856567.2736182,
+    "ast_hash": "2858a7e47ff8af4c5d274b1b9f8f28e9",
     "semantic_hash": ""
   },
   "src/assets/Image.cpp": {
@@ -252,9 +252,9 @@
     "semantic_hash": ""
   },
   "src/generator/MoviePack.cpp": {
-    "mtime": 1790793278.047421,
-    "seen": 1790793606.228388,
-    "ast_hash": "8e0836947f487cf4ad0a0773af533434",
+    "mtime": 1790856076.4632602,
+    "seen": 1790856567.2736356,
+    "ast_hash": "e070d13c787ad2f0630ed51ad400b0fe",
     "semantic_hash": ""
   },
   "src/generator/ProjectGenerator.cpp": {
@@ -294,9 +294,9 @@
     "semantic_hash": ""
   },
   "CMakeLists.txt": {
-    "mtime": 1790792752.6389093,
-    "seen": 1790793606.2283938,
-    "ast_hash": "48387bae759bb63b156f8e69c73530b8",
+    "mtime": 1790855357.8983822,
+    "seen": 1790856567.2736456,
+    "ast_hash": "9952cb76fd6661d97e8ee0b7aae62305",
     "semantic_hash": ""
   },
   "COMPATIBILITY.txt": {
@@ -306,9 +306,33 @@
     "semantic_hash": ""
   },
   "README.md": {
-    "mtime": 1790855194.4217138,
-    "seen": 1790855201.0030732,
-    "ast_hash": "0e9463841210f85ca7a41b0c53d49a25",
+    "mtime": 1790856560.2348156,
+    "seen": 1790856567.2736485,
+    "ast_hash": "b271b422be343a0103b0296025b0b3a1",
+    "semantic_hash": ""
+  },
+  "include/flashport/Audio.hpp": {
+    "mtime": 1790855324.6351771,
+    "seen": 1790856567.273574,
+    "ast_hash": "ce6191ea4306b47fc59803fa39e7be07",
+    "semantic_hash": ""
+  },
+  "runtime/Audio.cpp": {
+    "mtime": 1790856378.3035655,
+    "seen": 1790856567.273611,
+    "ast_hash": "3cf4b06cf5a7534193ee93ab6cf1d029",
+    "semantic_hash": ""
+  },
+  "runtime/Audio.hpp": {
+    "mtime": 1790856076.473885,
+    "seen": 1790856567.2736125,
+    "ast_hash": "68f9b4e2682dfbb2028c895c31d40beb",
+    "semantic_hash": ""
+  },
+  "src/assets/Audio.cpp": {
+    "mtime": 1790855346.5247219,
+    "seen": 1790856567.2736197,
+    "ast_hash": "3575f595b4b7852d91e01ff5c2417afe",
     "semantic_hash": ""
   }
 }

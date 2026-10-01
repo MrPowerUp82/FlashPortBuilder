@@ -130,6 +130,26 @@ generated/game/build/flash_game
 
 `flashport pack game.swf --output movie.pack` writes only the movie pack.
 
+### Multi-file games (a launcher that loads other SWFs and XML)
+
+Point `build` at a **folder** instead of a SWF:
+
+```bash
+./build/flashport build games/multi_files/some-game-files --output generated/some-game     [--entry launcher.swf]
+```
+
+The entry SWF (default `launcher.swf`) becomes the main `movie.pack`; every other SWF is
+converted to `data/<relative path>.pack` and every other file (XML, images, ...) is copied
+to `data/`. The runtime resolves `Loader.load`, `URLLoader.load` and `loadSwf` against that
+bundle (by progressively stripping the leading path), merges each loaded SWF into the
+running movie (character/texture/sound ids are shifted) and keeps one AVM2 *application
+domain* per loaded SWF, so `ApplicationDomain.getDefinition`, symbol-class binding and
+`LoaderInfo.content` behave like the Flash Player. A `.swf` missing from the bundle is
+replaced by an empty movie so loading sequences can finish. Text/XML files that the
+original game expected but that were not distributed must be supplied by the user: the
+stand-in `texts/texts-eng.xml` files in `games/multi_files/` are minimal, made-up
+replacements, not the originals.
+
 ## Runtime
 
 The generated executable plays the game from its movie pack:
@@ -161,8 +181,11 @@ The generated executable plays the game from its movie pack:
   and a native Flash API: display list (DisplayObject .. MovieClip/Sprite/SimpleButton/
   Stage, `addFrameScript`, timeline instances bound to their symbol classes and parent
   slots), events with capture/bubbling, mouse events, Timer/setTimeout, TextField,
-  geometry, Dictionary/ByteArray, SharedObject (in memory). Network, ads and sound are
-  stubs: loads fail with `ioError` like an offline player; sounds are silent.
+  geometry, Dictionary/ByteArray, SharedObject (in memory), `BitmapData` (real pixels:
+  `draw` through an offscreen render, `getColorBoundsRect`, `hitTest`, `copyPixels`, blends),
+  E4X `XML`/`XMLList` (`.child`, `@attr`, `..desc`, `for each`, `in`), `Vector`, `Vector3D`,
+  `scrollRect` (cropped, shifted contents: game cameras), blend modes and filters objects
+  (stored, not drawn). Loads from the web fail with `ioError` like an offline player.
 
 - **Sound** (all three script models): DefineSound (PCM, ADPCM, MP3), timeline `StartSound`
   (loops, in/out points, volume envelopes, "stop" and "no multiple" flags), stream sounds
@@ -181,8 +204,10 @@ For automated checks: `flash_game [movie.pack] [--play-all] [--view <n>] [--dump
 
 Status per game. Debug env vars: `FP_TRACE_PROP=_x` logs every
 assignment of a MovieClip property, `FP_TRACE_CALL=name` logs a method's calls and results,
-`FP_TRACE_AUDIO=1` logs every started sound with its level, `FP_DUMP_DEPTH`/`FP_DUMP_BUTTONS`
-refine `--dump`. In scripted runs `--audio-out file.wav` also saves the mixed audio.
+`FP_TRACE_AUDIO=1` logs every started sound with its level, `FP_DUMP_DEPTH`/`FP_DUMP_BUTTONS`/
+`FP_DUMP_BOUNDS` refine `--dump`, `FP_TRACE_STACK=1` prints the AS3 call stack of uncaught
+errors, `FP_TRACE_EVENT=1` logs dispatched events, `FP_TRACE_HIT=1` the object chain under each
+click, `FP_TRACE_XML=1` XML iteration. In scripted runs `--audio-out file.wav` also saves the mixed audio.
 - **Dragon Ball Fierce Fighting 2.8** (AVM1): playable - menus, difficulty, fights with
   W/A/S/D + J/K/L/U/I/O, combo counter.
 - **Mike Shadow: I Paid For It** (AS3): playable - preloader (the "Go!" button appears
@@ -193,6 +218,14 @@ refine `--dump`. In scripted runs `--audio-out file.wav` also saves the mixed au
   buildings, falling debris, height meter (needed `Object.registerClass`).
 - **Mortal Kombat Karnage** (AVM1): playable - menu, mode and fighter select, difficulty,
   fight tower, fights with arrows + S/A/D.
+- **Ben 10: Sumo Slammer Samurai** (AS3, multi-file): playable - title, menu, instructions,
+  level loaded from `levels/*.swf`, platforms (pixel collision through BitmapData), crates, coins.
+- **Ben 10 Omniverse: The Return of Psyphon** (AS3, multi-file): playable - title, menus,
+  player and character select, level 1 with scrolling camera, both heroes (sidekick AI),
+  enemies, obstacles, HUD and sound.
+- **Generator Rex: Heroes United** (AS3, multi-file): menus, team select and loading work; the
+  download lacks `scenery1.swf`, so the first level cannot start (a `MusicScenery1_1` sound is
+  undefined).
 - **Comic Stars Fighting 3.6** (AS3, unpacked from its Alchemy loader): playable - title
   ("start"), New Game, player stats, Single-Player, character select (then "Battle Mode"),
   level select, fights with W/A/S/D + J/K/L/U/I/O, combo counter.
@@ -223,8 +256,8 @@ AIR-encrypted SWF; a few hand-made/cross-compiled ABC bodies get genuine verifie
 ## Not implemented yet
 
 - Script execution / C++ code generation from AVM1/AVM2.
-- Filters, blend modes, video; morph shape ratios set only by scripts use the closest
-  tessellated ratio.
+- Filters (stored but not drawn), video; morph shape ratios set only by scripts use the
+  closest tessellated ratio.
 - Nellymoser/Speex decoding; per-sound loudness is not normalised.
 - Anti-aliasing of tessellated shapes.
 - Protected-SWF schemes other than the Alchemy XOR loader.
