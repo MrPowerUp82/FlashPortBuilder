@@ -1,0 +1,16 @@
+FlashPortBuilder compatibility matrix
+
+File                              Ver   Stage         FPS     Script            DoABC    DoAction  Sprites  Binary    Embedded
+--------------------------------------------------------------------------------------------------------------------------------
+mike-shadow-i-paid-for-it.swf     9     780x450       24.0    AVM2 / AS3        427      0         987      0         0
+comic-stars-fighting-3-6.swf      10    550x400       34.0    AVM2 / AS3        2        0         9        2         0
+dragon-ball-fierce-fighting-2-8.s 15    550x400       36.0    AVM2 / AS3        2        0         4        1         1
+comic-stars-fighting-3-6_unpacked 12    550x400       34.0    AVM2 / AS3        1        0         763      0         0
+
+Port pipeline status (flashport v0.2.0: unpack / disasm / extract)
+
+Game                  Game SWF                         Code decode                                   Assets
+------------------------------------------------------------------------------------------------------------------------------------
+Mike Shadow           outer (AS3)                      AVM2 2373 bodies / 80376 instr, 0 errors     78 bmp, 11158 shapes, 10 snd + 1 stream
+Comic Stars 3.6       unpacked (Alchemy XOR, AS3 v12)  AVM2 4645 bodies / 186222 instr, 0 errors    2536 bmp, 3028 shapes, 19 snd
+Dragon Ball FF 2.8    BinaryData #8 (AVM1, 30 fps)     AVM1 5956 sources / 189720 actions, 0 errors 1907 bmp, 2813 shapes, 48 snd

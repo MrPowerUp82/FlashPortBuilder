@@ -1,0 +1,338 @@
+{
+  ".claude/launch.json": {
+    "mtime": 1790704771.7000096,
+    "seen": 1790793606.2283516,
+    "ast_hash": "05db71f1d395bfed1faa243ed68af625",
+    "semantic_hash": ""
+  },
+  "include/flashport/ABCFile.hpp": {
+    "mtime": 1790792551.074993,
+    "seen": 1790793606.2283564,
+    "ast_hash": "6e4be62347e6e2592de9f7627bee1348",
+    "semantic_hash": ""
+  },
+  "include/flashport/ABCReader.hpp": {
+    "mtime": 1790703038.157752,
+    "seen": 1790793606.2283585,
+    "ast_hash": "85f296a2d210a9104f4216c675cf6400",
+    "semantic_hash": ""
+  },
+  "include/flashport/AVM1Code.hpp": {
+    "mtime": 1790703818.7717168,
+    "seen": 1790793606.2283592,
+    "ast_hash": "f53f8b144848b8e5bcdabd298770ceda",
+    "semantic_hash": ""
+  },
+  "include/flashport/AVM2Code.hpp": {
+    "mtime": 1790703708.5134892,
+    "seen": 1790793606.22836,
+    "ast_hash": "7188af9d722125f76464204b5a1878d1",
+    "semantic_hash": ""
+  },
+  "include/flashport/AssetExtractor.hpp": {
+    "mtime": 1790706744.3879802,
+    "seen": 1790793606.2283607,
+    "ast_hash": "e60495035f3326710dd48e4a61bdd106",
+    "semantic_hash": ""
+  },
+  "include/flashport/BitReader.hpp": {
+    "mtime": 1790703608.2301664,
+    "seen": 1790793606.2283618,
+    "ast_hash": "260b1bd8902cf179d7add9b44360fffe",
+    "semantic_hash": ""
+  },
+  "include/flashport/ByteReader.hpp": {
+    "mtime": 1790703038.1467197,
+    "seen": 1790793606.2283626,
+    "ast_hash": "0dacd25b94b98f71a1b7a1e0230d5df4",
+    "semantic_hash": ""
+  },
+  "include/flashport/Disassembler.hpp": {
+    "mtime": 1790703963.0594625,
+    "seen": 1790793606.2283633,
+    "ast_hash": "e12bf33de20b1e3e69718c8e8d647bf6",
+    "semantic_hash": ""
+  },
+  "include/flashport/FrameScripts.hpp": {
+    "mtime": 1790706765.3511064,
+    "seen": 1790793606.2283638,
+    "ast_hash": "8e847dae10d918f3775ead45d0136e0a",
+    "semantic_hash": ""
+  },
+  "include/flashport/Image.hpp": {
+    "mtime": 1790792749.5150106,
+    "seen": 1790793606.2283645,
+    "ast_hash": "fadac92b2c88b671905b1d50aa5c3f01",
+    "semantic_hash": ""
+  },
+  "include/flashport/MoviePack.hpp": {
+    "mtime": 1790855415.318003,
+    "seen": 1790856567.2735853,
+    "ast_hash": "9999e97902397108cd770dfd52391a8d",
+    "semantic_hash": ""
+  },
+  "include/flashport/ProjectGenerator.hpp": {
+    "mtime": 1790707049.7997696,
+    "seen": 1790793606.2283661,
+    "ast_hash": "0c8d50231951e10bac964df65a3bdd4a",
+    "semantic_hash": ""
+  },
+  "include/flashport/SWFDocument.hpp": {
+    "mtime": 1790704035.3105047,
+    "seen": 1790793606.2283669,
+    "ast_hash": "b8cc09ebb2eb8db6eff1fe9c677ecc93",
+    "semantic_hash": ""
+  },
+  "include/flashport/SWFReader.hpp": {
+    "mtime": 1790703038.160785,
+    "seen": 1790793606.2283676,
+    "ast_hash": "24762f5fc625b2950fd97f6eeacd26e7",
+    "semantic_hash": ""
+  },
+  "include/flashport/SWFStructures.hpp": {
+    "mtime": 1790706809.204996,
+    "seen": 1790793606.2283683,
+    "ast_hash": "9acda6e00ef1864a56e4b27706a18afb",
+    "semantic_hash": ""
+  },
+  "include/flashport/Shape.hpp": {
+    "mtime": 1790793251.2846365,
+    "seen": 1790793606.228369,
+    "ast_hash": "a8bca45065b07f4ea58c6f010f9f6e34",
+    "semantic_hash": ""
+  },
+  "include/flashport/Tessellator.hpp": {
+    "mtime": 1790706659.9251506,
+    "seen": 1790793606.2283697,
+    "ast_hash": "1d8a7202069737bd09affbe12916d6d5",
+    "semantic_hash": ""
+  },
+  "include/flashport/Unpacker.hpp": {
+    "mtime": 1790792987.3188045,
+    "seen": 1790793606.2283704,
+    "ast_hash": "e95771395b05a3d8c410b45d889997dc",
+    "semantic_hash": ""
+  },
+  "runtime/AVM1.cpp": {
+    "mtime": 1790855632.537862,
+    "seen": 1790856567.2735977,
+    "ast_hash": "3672f49244dbf3dc4eb83c4a46c69031",
+    "semantic_hash": ""
+  },
+  "runtime/AVM1.hpp": {
+    "mtime": 1790855632.525656,
+    "seen": 1790856567.2735994,
+    "ast_hash": "a8ccb3d53cca659b9a71e4f0fb7f4262",
+    "semantic_hash": ""
+  },
+  "runtime/AVM1Builtins.cpp": {
+    "mtime": 1790855632.5271723,
+    "seen": 1790856567.273601,
+    "ast_hash": "6cd305920dca762557457a4c8e87733b",
+    "semantic_hash": ""
+  },
+  "runtime/AVM1Clip.cpp": {
+    "mtime": 1790796290.584728,
+    "seen": 1790855201.0030472,
+    "ast_hash": "d8fa2bbbdf44ca5da75c4fdb45e64347",
+    "semantic_hash": ""
+  },
+  "runtime/AVM2.cpp": {
+    "mtime": 1790792551.1822739,
+    "seen": 1790793606.2283745,
+    "ast_hash": "409f714cbab828b6aedb9af00ed2f1a9",
+    "semantic_hash": ""
+  },
+  "runtime/AVM2.hpp": {
+    "mtime": 1790792551.097294,
+    "seen": 1790793606.2283752,
+    "ast_hash": "3a10ad1b28aa4a6165098caea95d2ef1",
+    "semantic_hash": ""
+  },
+  "runtime/AVM2Abc.cpp": {
+    "mtime": 1790792551.1177971,
+    "seen": 1790793606.228376,
+    "ast_hash": "07e04b92f2efe4d5aa7113ac77c35555",
+    "semantic_hash": ""
+  },
+  "runtime/AVM2Builtins.cpp": {
+    "mtime": 1790768110.2670064,
+    "seen": 1790793606.2283769,
+    "ast_hash": "540d6a4cb02927488c1c063c399bebdb",
+    "semantic_hash": ""
+  },
+  "runtime/AVM2Flash.cpp": {
+    "mtime": 1790855805.2355285,
+    "seen": 1790856567.2736094,
+    "ast_hash": "97f13d255aa841fc9cb5d103fdf68197",
+    "semantic_hash": ""
+  },
+  "runtime/FlashRuntime.cpp": {
+    "mtime": 1790856076.5124314,
+    "seen": 1790856567.2736142,
+    "ast_hash": "0acec6ac6872393f399ba7d7034d18c1",
+    "semantic_hash": ""
+  },
+  "runtime/FlashRuntime.hpp": {
+    "mtime": 1790856076.5134275,
+    "seen": 1790856567.2736154,
+    "ast_hash": "1f4b77b52251d13f17dd47c42963936a",
+    "semantic_hash": ""
+  },
+  "runtime/main.cpp": {
+    "mtime": 1790855695.1163201,
+    "seen": 1790856567.2736166,
+    "ast_hash": "b8b05438bae04907b6c15161a2a3e6c4",
+    "semantic_hash": ""
+  },
+  "src/assets/AssetExtractor.cpp": {
+    "mtime": 1790855351.7627456,
+    "seen": 1790856567.2736182,
+    "ast_hash": "2858a7e47ff8af4c5d274b1b9f8f28e9",
+    "semantic_hash": ""
+  },
+  "src/assets/Image.cpp": {
+    "mtime": 1790704478.4445589,
+    "seen": 1790793606.2283812,
+    "ast_hash": "6521c14996bdd7f357e8a16817c6c5f7",
+    "semantic_hash": ""
+  },
+  "src/assets/ImageDecode.cpp": {
+    "mtime": 1790792747.719601,
+    "seen": 1790793606.2283816,
+    "ast_hash": "377d3a9eaf47ec314fb1825304df0fc6",
+    "semantic_hash": ""
+  },
+  "src/assets/Shape.cpp": {
+    "mtime": 1790793251.28361,
+    "seen": 1790793606.2283828,
+    "ast_hash": "43e825274d2d3aa2e923cabeb2adc0e4",
+    "semantic_hash": ""
+  },
+  "src/assets/Tessellator.cpp": {
+    "mtime": 1790709140.504727,
+    "seen": 1790793606.2283833,
+    "ast_hash": "c8f632ea7caf6fdfa123ef8d1f206544",
+    "semantic_hash": ""
+  },
+  "src/avm1/AVM1Code.cpp": {
+    "mtime": 1790703874.334861,
+    "seen": 1790793606.228384,
+    "ast_hash": "4faf604c695bb17eefa34de9465fef2d",
+    "semantic_hash": ""
+  },
+  "src/avm2/ABCFile.cpp": {
+    "mtime": 1790792561.3171854,
+    "seen": 1790793606.2283847,
+    "ast_hash": "01b3eefb4b15741ab3480175f80aaa22",
+    "semantic_hash": ""
+  },
+  "src/avm2/ABCReader.cpp": {
+    "mtime": 1790792551.0739784,
+    "seen": 1790793606.2283854,
+    "ast_hash": "d7bbcdb7ff5e813fba4f32c832a9ac78",
+    "semantic_hash": ""
+  },
+  "src/avm2/AVM2Code.cpp": {
+    "mtime": 1790792551.097294,
+    "seen": 1790793606.2283864,
+    "ast_hash": "6f9ff8ee36e453efc378c2983c9ec7c6",
+    "semantic_hash": ""
+  },
+  "src/generator/Disassembler.cpp": {
+    "mtime": 1790704305.5218377,
+    "seen": 1790793606.2283869,
+    "ast_hash": "6cf080a1bb2c05b2ed1cb8fda95ed30e",
+    "semantic_hash": ""
+  },
+  "src/generator/FrameScripts.cpp": {
+    "mtime": 1790707108.4365873,
+    "seen": 1790793606.2283876,
+    "ast_hash": "7f620ffb5bc6d31d1dc0c90962727b10",
+    "semantic_hash": ""
+  },
+  "src/generator/MoviePack.cpp": {
+    "mtime": 1790856076.4632602,
+    "seen": 1790856567.2736356,
+    "ast_hash": "e070d13c787ad2f0630ed51ad400b0fe",
+    "semantic_hash": ""
+  },
+  "src/generator/ProjectGenerator.cpp": {
+    "mtime": 1790769152.3840494,
+    "seen": 1790793606.2283893,
+    "ast_hash": "7967d2c5b419d70b553f7c093c558fa8",
+    "semantic_hash": ""
+  },
+  "src/main.cpp": {
+    "mtime": 1790769152.353452,
+    "seen": 1790793606.22839,
+    "ast_hash": "e611b24dc435b5cd4869ec0d4251301b",
+    "semantic_hash": ""
+  },
+  "src/swf/SWFDocument.cpp": {
+    "mtime": 1790792590.9452724,
+    "seen": 1790793606.2283907,
+    "ast_hash": "cdadb577dad3c0b90d357788b3001e4a",
+    "semantic_hash": ""
+  },
+  "src/swf/SWFReader.cpp": {
+    "mtime": 1790703618.7352023,
+    "seen": 1790793606.2283914,
+    "ast_hash": "b6b08c699ebdeb427ec6dbb5d59a384d",
+    "semantic_hash": ""
+  },
+  "src/swf/SWFStructures.cpp": {
+    "mtime": 1790706809.204996,
+    "seen": 1790793606.2283921,
+    "ast_hash": "ba2e8f97ff8ff277e15e44cecab59490",
+    "semantic_hash": ""
+  },
+  "src/unpack/Unpacker.cpp": {
+    "mtime": 1790792985.8657737,
+    "seen": 1790793606.228393,
+    "ast_hash": "cac140adf1d1831edec9a79150b97f68",
+    "semantic_hash": ""
+  },
+  "CMakeLists.txt": {
+    "mtime": 1790855357.8983822,
+    "seen": 1790856567.2736456,
+    "ast_hash": "9952cb76fd6661d97e8ee0b7aae62305",
+    "semantic_hash": ""
+  },
+  "COMPATIBILITY.txt": {
+    "mtime": 1790705155.631331,
+    "seen": 1790793606.2283945,
+    "ast_hash": "a55632d04f3a61c4a03f112e5efea571",
+    "semantic_hash": ""
+  },
+  "README.md": {
+    "mtime": 1790856560.2348156,
+    "seen": 1790856567.2736485,
+    "ast_hash": "b271b422be343a0103b0296025b0b3a1",
+    "semantic_hash": ""
+  },
+  "include/flashport/Audio.hpp": {
+    "mtime": 1790855324.6351771,
+    "seen": 1790856567.273574,
+    "ast_hash": "ce6191ea4306b47fc59803fa39e7be07",
+    "semantic_hash": ""
+  },
+  "runtime/Audio.cpp": {
+    "mtime": 1790856378.3035655,
+    "seen": 1790856567.273611,
+    "ast_hash": "3cf4b06cf5a7534193ee93ab6cf1d029",
+    "semantic_hash": ""
+  },
+  "runtime/Audio.hpp": {
+    "mtime": 1790856076.473885,
+    "seen": 1790856567.2736125,
+    "ast_hash": "68f9b4e2682dfbb2028c895c31d40beb",
+    "semantic_hash": ""
+  },
+  "src/assets/Audio.cpp": {
+    "mtime": 1790855346.5247219,
+    "seen": 1790856567.2736197,
+    "ast_hash": "3575f595b4b7852d91e01ff5c2417afe",
+    "semantic_hash": ""
+  }
+}
