@@ -123,6 +123,9 @@ std::unique_ptr<AbcFile> parseAbc(const std::vector<std::uint8_t>& bytes, const 
             case 0x05: ns.kind = NsKind::Private; break;
             default: ns.kind = NsKind::Public; break;
         }
+        // The AS3 namespace (`use namespace AS3` / explicit Array.AS3::push) names the same builtin
+        // methods as the public ones.
+        if (ns.uri == "http://adobe.com/AS3/2006/builtin") ns = Namespace::pub();
         // Private namespaces need a stable identity: use the address of this ABC plus the index.
         if (ns.kind == NsKind::Private) ns.owner = reinterpret_cast<const char*>(abc.get()) + i;
         f.namespaces.push_back(ns);
@@ -158,8 +161,8 @@ std::unique_ptr<AbcFile> parseAbc(const std::vector<std::uint8_t>& bytes, const 
                 m.attribute = kind == 0x0d;
                 break;
             }
-            case 0x0f: case 0x10: m.name = str(in.u30()); m.rtNs = true; break;
-            case 0x11: case 0x12: m.rtNs = true; m.rtName = true; break;
+            case 0x0f: case 0x10: m.name = str(in.u30()); m.rtNs = true; m.attribute = kind == 0x10; break;
+            case 0x11: case 0x12: m.rtNs = true; m.rtName = true; m.attribute = kind == 0x12; break;
             case 0x09: case 0x0e: {
                 const auto nm = in.u30(), set = in.u30();
                 m.name = str(nm);
@@ -172,6 +175,7 @@ std::unique_ptr<AbcFile> parseAbc(const std::vector<std::uint8_t>& bytes, const 
                 const auto set = in.u30();
                 if (set < f.nsSets.size()) m.nss = f.nsSets[set];
                 m.rtName = true;
+                m.attribute = kind == 0x1c;
                 break;
             }
             case 0x1d: { // TypeName (generics): keep the base name

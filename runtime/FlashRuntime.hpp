@@ -2,7 +2,7 @@
 // FlashPort runtime: plays a movie pack produced by FlashPortBuilder.
 //
 // Movie pack format (little-endian; str = u16 length + bytes; code = u32 length + AVM1 bytecode):
-//   "FPK1" u32 version(=6)
+//   "FPK1" u32 version(=7)
 //   i32 xmin xmax ymin ymax (twips)  f32 fps  u8 bg r g b  u8 swfVersion  u8 scriptMode (1 AVM1, 2 AVM2)
 //   u32 bitmapCount  { u32 id, u16 w, u16 h, u32 zlen, zlib(RGBA straight alpha) }
 //   u32 shapeCount, u32 rawSize, u32 zSize, zlib( shapeCount x { u32 id, i32 xmin ymin xmax ymax,
@@ -13,8 +13,8 @@
 //                      { str label, u32 cmdCount { u8 type: 1 place | 2 remove, ... },
 //                        u32 actionCount { u8 kind, i32 frame, str label },
 //                        u32 scriptCount { code }, u32 initCount { u16 sprite, code } } }
-//     place: u16 depth, u8 flags, [0x01 u16 char] [0x02 f32 a b c d tx ty] [0x04 f32 mul[4] i16 add[4]]
-//            [0x10 u16 clipDepth] [0x20 u16 ratio] [0x40 str name]; 0x08 = move, 0x80 = invisible;
+//     place: u16 depth, u8 flags, u8 flags2 (0x01 blend), [0x01 u16 char] [0x02 f32 a b c d tx ty] [0x04 f32 mul[4] i16 add[4]]
+//            [0x10 u16 clipDepth] [0x20 u16 ratio] [0x40 str name] [blend: u8 mode]; 0x08 = move, 0x80 = invisible;
 //            then u32 clipActionCount { u32 events, u8 keyCode, code }
 //     remove: u16 depth
 //   u32 buttonCount  { u32 id, u8 trackAsMenu, u32 recordCount { u8 states, u16 char, u16 depth, f32 matrix[6],
@@ -35,6 +35,7 @@
 #include "Audio.hpp"
 #include <SDL.h>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <memory>
 #include <set>
@@ -96,6 +97,8 @@ struct PlaceCmd {
     std::uint8_t type{};
     std::uint16_t depth{};
     std::uint8_t flags{};
+    std::uint8_t flags2{}; // 0x01: blend mode present
+    std::uint8_t blend{};  // SWF blend mode (0/1 normal, 3 multiply, 4 screen, ... 8 add)
     std::uint16_t character{};
     Matrix matrix;
     ColorTransform cxform;
@@ -168,6 +171,13 @@ struct Movie {
     std::map<std::uint32_t, EditTextDef> editTexts;
 
     bool load(const std::string& path, std::string& error);
+    // Merges a SWF loaded at run time (Loader.load): every character id of `src` is shifted by the
+    // returned base so ids stay unique (its main timeline becomes character `base`). Returns -1
+    // when the id space is exhausted. ABC blocks are not merged; the caller loads them.
+    int mergeLoaded(Movie&& src, int domain);
+    // AVM2 application domain of the SWF a character id came from (0 = the entry SWF).
+    int domainOf(std::uint32_t character) const;
+    std::vector<std::pair<std::uint32_t, int>> domainBases; // (first character id, domain), ascending
     int stageWidth() const { return (stage[1] - stage[0]) / 20; }
     int stageHeight() const { return (stage[3] - stage[2]) / 20; }
 };
@@ -197,6 +207,7 @@ struct DisplayObject : std::enable_shared_from_this<DisplayObject> {
     Matrix matrix;
     ColorTransform cxform;
     std::uint16_t clipDepth{}, ratio{};
+    std::uint8_t blendMode = 0; // SWF blend mode; 0/1 normal
     bool visible = true;
     bool dynamic = false;          // created by script (attachMovie...): survives timeline gotos
     bool dynamicTransform = false; // transformed by script: the timeline no longer moves it (Flash behaviour)
@@ -301,6 +312,17 @@ struct Player {
     bool virtualClock = false; // timers follow ticks (deterministic runs) instead of the wall clock
     double timeMs() const;
     Audio audio;                   // declared before `root`: clips stop their streams when destroyed
+    // Multi-file games: the other SWFs (as .pack) and data files bundled next to movie.pack.
+    std::string dataRoot;
+    struct LoadedSwf { int base = -1; int domain = 0; };
+    // Loads data/<url>.pack into the running movie (ids shifted by `base`, ABC blocks added to the
+    // AVM2 domain `domain`, or a fresh one when `domain` < 0). Repeated loads reuse the first copy.
+    bool loadSwf(const std::string& url, int domain, LoadedSwf& out, std::string& error);
+    bool readDataFile(const std::string& url, std::vector<std::uint8_t>& out);
+    bool resolveData(const std::string& url, const char* suffix, std::string& path, std::string& canon);
+    Movie& movieRw() { return const_cast<Movie&>(movie); }
+    // Set by the host: renders a display object offscreen (BitmapData.draw).
+    std::function<bool(const DisplayObject&, const Matrix&, int, int, std::vector<std::uint32_t>&)> renderObject;
     std::unique_ptr<Clip> root;
     std::unique_ptr<avm1::VM> vm;  // AVM1 interpreter (null unless the movie runs AVM1 scripts)
     std::unique_ptr<avm2::VM> vm2; // AVM2 interpreter (null unless the movie runs ActionScript 3)
@@ -312,6 +334,8 @@ struct Player {
     bool mouseDown = false;
     DisplayObject* hoverButton = nullptr;
     DisplayObject* pressedButton = nullptr;
+    std::map<std::string, LoadedSwf> loadedSwfs; // resolved pack path -> where it was merged
+    std::map<std::string, std::string> dataIndex; // lower-case relative path -> real path
     std::set<std::uint16_t> initDone; // sprites whose DoInitAction already ran
     // Plays a pack sound (DefineSound id) and returns the audio handle (0 when it did not start).
     int playSound(std::uint32_t id, const SoundPlayDef& info, float volume = 1, float pan = 0);
@@ -349,11 +373,16 @@ public:
     Renderer(SDL_Renderer* r, Movie& movie, int width, int height);
     ~Renderer();
     void drawClip(const Clip& clip, const Matrix& m, const ColorTransform& cx);
+    // Renders what `obj` displays (its own transform ignored) with `m` (twips -> bitmap pixels) into
+    // a w x h straight-alpha ARGB buffer; used by BitmapData.draw.
+    bool renderToPixels(const DisplayObject& obj, const Matrix& m, int w, int h, std::vector<std::uint32_t>& out);
     bool bounds(const Clip& clip, const Matrix& m, float out[4]) const { return Geometry(movie_).clipBounds(clip, m, out); }
     std::uint64_t trianglesDrawn = 0;
     bool masksEnabled = true;
 
 private:
+    SDL_BlendMode activeBlend_ = SDL_BLENDMODE_BLEND; // blend mode of the object being drawn
+    static SDL_BlendMode blendFor(std::uint8_t mode);
     using ChildIt = std::map<int, std::shared_ptr<DisplayObject>>::const_iterator;
     void drawMasked(const DisplayObject& mask, ChildIt first, ChildIt last, const Matrix& m, const ColorTransform& cx);
     void drawObject(const DisplayObject& obj, const Matrix& m, const ColorTransform& cx);

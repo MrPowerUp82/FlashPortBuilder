@@ -52,6 +52,92 @@ std::map<int, std::weak_ptr<Object>>& channelRegistry() {
     return m;
 }
 
+struct DomainData : NativeData {
+    int domain = 0;
+};
+int domainIdOf(const Value& v) {
+    auto d = v.isObject() ? std::dynamic_pointer_cast<DomainData>(v.o->native) : nullptr;
+    return d ? d->domain : -1;
+}
+// One ApplicationDomain object per domain id.
+Value domainObject(VM& vm, int id) {
+    static std::map<const VM*, std::map<int, ObjectPtr>> objects;
+    auto& m = objects[&vm];
+    auto it = m.find(id);
+    if (it == m.end()) {
+        auto o = vm.construct(Value(vm.findClass("flash.system::ApplicationDomain")), {Value(0.0), Value(true)}).o;
+        std::dynamic_pointer_cast<DomainData>(o->native)->domain = id;
+        it = m.emplace(id, o).first;
+    }
+    return Value(it->second);
+}
+
+struct BitmapDataNative : NativeData {
+    int w = 0, h = 0;
+    bool transparent = true;
+    std::vector<std::uint32_t> px; // 0xAARRGGBB, straight alpha
+    std::uint32_t& at(int x, int y) { return px[static_cast<std::size_t>(y) * w + x]; }
+};
+std::shared_ptr<BitmapDataNative> bitmapOf(const Value& v) {
+    return v.isObject() ? std::dynamic_pointer_cast<BitmapDataNative>(v.o->native) : nullptr;
+}
+
+enum class BlendMode { Normal, Difference, Add, Multiply, Subtract };
+
+// ColorTransform: channel = clamp(channel * mul + add).
+struct ColorXform {
+    double mul[4] = {1, 1, 1, 1}; // r g b a
+    double add[4] = {0, 0, 0, 0};
+    bool isIdentity() const {
+        for (int i = 0; i < 4; ++i) if (mul[i] != 1 || add[i] != 0) return false;
+        return true;
+    }
+    std::uint32_t apply(std::uint32_t argb) const {
+        const double c[4] = {double((argb >> 16) & 0xff), double((argb >> 8) & 0xff), double(argb & 0xff), double(argb >> 24)};
+        std::uint32_t out[4];
+        for (int i = 0; i < 4; ++i) out[i] = static_cast<std::uint32_t>(std::clamp(std::floor(c[i] * mul[i] + add[i]), 0.0, 255.0));
+        return (out[3] << 24) | (out[0] << 16) | (out[1] << 8) | out[2];
+    }
+};
+ColorXform readColorXform(VM& vm, const Value& v) {
+    ColorXform ct;
+    if (!v.isObject()) return ct;
+    const char* mul[4] = {"redMultiplier", "greenMultiplier", "blueMultiplier", "alphaMultiplier"};
+    const char* add[4] = {"redOffset", "greenOffset", "blueOffset", "alphaOffset"};
+    for (int i = 0; i < 4; ++i) {
+        const Value m = vm.getPublic(v, mul[i]), o = vm.getPublic(v, add[i]);
+        if (!m.isUndefined()) ct.mul[i] = vm.toNumber(m);
+        if (!o.isUndefined()) ct.add[i] = vm.toNumber(o);
+    }
+    return ct;
+}
+
+// Composites straight-alpha `src` onto `dst` with a Flash blend mode.
+std::uint32_t blendPixel(std::uint32_t dst, std::uint32_t src, BlendMode mode) {
+    const unsigned sa = src >> 24;
+    if (sa == 0) return dst;
+    const unsigned da = dst >> 24;
+    auto ch = [&](unsigned shift, unsigned d, unsigned sc) -> unsigned {
+        (void)shift;
+        int blended;
+        switch (mode) {
+            case BlendMode::Difference: blended = std::abs(int(d) - int(sc)); break;
+            case BlendMode::Add: blended = std::min(255, int(d) + int(sc)); break;
+            case BlendMode::Subtract: blended = std::max(0, int(d) - int(sc)); break;
+            case BlendMode::Multiply: blended = int(d) * int(sc) / 255; break;
+            default: blended = int(sc); break;
+        }
+        // Where the destination is transparent the source shows unblended.
+        const int base = da == 0 ? int(sc) : blended;
+        return static_cast<unsigned>(int(d) + (base - int(d)) * int(sa) / 255);
+    };
+    const unsigned r = ch(16, (dst >> 16) & 0xff, (src >> 16) & 0xff);
+    const unsigned g = ch(8, (dst >> 8) & 0xff, (src >> 8) & 0xff);
+    const unsigned b = ch(0, dst & 0xff, src & 0xff);
+    const unsigned a = sa + da * (255 - sa) / 255;
+    return (a << 24) | (r << 16) | (g << 8) | b;
+}
+
 std::shared_ptr<EventData> eventOf(const Value& v) {
     return v.isObject() ? std::dynamic_pointer_cast<EventData>(v.o->native) : nullptr;
 }
@@ -67,21 +153,35 @@ NativeData& dispatcherOf(Object& o) {
     return *o.native;
 }
 
-// Symbol linkage: class name -> character id (from SymbolClass).
+// Symbol linkage: "class name@domain" -> character id (from SymbolClass). Classes of the same
+// name in different application domains (levels loaded separately) bind to different symbols.
 std::map<std::string, std::uint16_t>& symbolIds(Player& player) {
-    static std::map<const Player*, std::map<std::string, std::uint16_t>> cache;
-    auto& m = cache[&player];
-    if (m.empty()) {
+    static std::map<const Player*, std::pair<std::size_t, std::map<std::string, std::uint16_t>>> cache;
+    auto& entry = cache[&player];
+    auto& m = entry.second;
+    if (m.empty() || entry.first != player.movie.symbols.size()) { // rebuilt after SWFs are loaded
+        entry.first = player.movie.symbols.size();
+        m.clear();
         for (const auto& [id, name] : player.movie.symbols) {
             if (id == 0) continue;
             std::string qn = name;
             const auto dot = qn.rfind('.');
             if (dot != std::string::npos) qn = qn.substr(0, dot) + "::" + qn.substr(dot + 1);
-            m[qn] = static_cast<std::uint16_t>(id);
+            m[qn + "@" + std::to_string(player.movie.domainOf(id))] = static_cast<std::uint16_t>(id);
         }
-        m[""] = 0; // marker: built
+        m["@"] = 0; // marker: built
     }
     return m;
+}
+
+// Character bound to a class (or one of its superclasses) by SymbolClass; 0 when unbound.
+std::uint16_t characterForClass(Player& player, const Class* cls) {
+    auto& ids = symbolIds(player);
+    for (const Class* c = cls; c; c = c->super.get()) {
+        const auto it = ids.find(c->qualifiedName() + "@" + std::to_string(c->abc ? c->abc->domain : 0));
+        if (it != ids.end() && it->second) return it->second;
+    }
+    return 0;
 }
 
 bool classDerivesFrom(const Class* c, const char* name) {
@@ -170,7 +270,7 @@ ClassPtr VM::classForCharacter(std::uint16_t character, DisplayObject::Kind kind
             std::string qn = name;
             const auto dot = qn.rfind('.');
             if (dot != std::string::npos) qn = qn.substr(0, dot) + "::" + qn.substr(dot + 1);
-            if (auto c = findClass(qn)) return c;
+            if (auto c = findClassIn(qn, player.movie.domainOf(character))) return c;
         }
     }
     switch (kind) {
@@ -219,6 +319,13 @@ void VM::runFrameScript(const ObjectPtr& clipObj, int frame) {
 bool VM::dispatchEvent(const ObjectPtr& target, const ObjectPtr& event) {
     auto ev = std::dynamic_pointer_cast<EventData>(event->native);
     if (!ev) return true;
+    // Debug aid: FP_TRACE_EVENT=* (or a type name) logs dispatched events.
+    static const char* traceEvent = std::getenv("FP_TRACE_EVENT");
+    if (traceEvent && (traceEvent[0] == '*' || ev->type == traceEvent)) {
+        std::size_t listeners = 0;
+        if (target->native) { auto it = target->native->listeners.find(ev->type); if (it != target->native->listeners.end()) listeners = it->second.size(); }
+        std::fprintf(stderr, "[event] %s -> %s (%zu listeners)\n", ev->type.c_str(), target->cls ? target->cls->qualifiedName().c_str() : "?", listeners);
+    }
     ev->target = Value(target);
     ev->stop = ev->stopNow = false;
     const auto path = ev->bubbles || true ? propagationPath(*this, target) : std::vector<ObjectPtr>{target};
@@ -627,6 +734,82 @@ void installFlashImpl(VM& vm) {
         });
     point->sealed = false;
 
+    // flash.geom.Vector3D
+    auto vec3 = vm.defineNativeClass("flash.geom", "Vector3D", obj);
+    vec3->sealed = false;
+    auto v3 = [](VM& vm, const Value& v, const char* f) { return vm.toNumber(vm.getPublic(v, f)); };
+    auto makeV3 = [](VM& vm, double x, double y, double z, double w = 0) {
+        return vm.construct(Value(vm.findClass("flash.geom::Vector3D")), {Value(x), Value(y), Value(z), Value(w)});
+    };
+    ClassBuilder v3b{vm, vec3};
+    v3b.ctor([](VM& vm, const Value& self, Args& a) {
+        if (self.isObject()) {
+            const char* names[4] = {"x", "y", "z", "w"};
+            for (std::size_t i = 0; i < 4; ++i) self.o->dynamic.set(names[i], Value(num(vm, a, i)));
+        }
+        return Value();
+    });
+    v3b.getter("length", [v3](VM& vm, const Value& s, Args&) { return Value(std::sqrt(std::pow(v3(vm, s, "x"), 2) + std::pow(v3(vm, s, "y"), 2) + std::pow(v3(vm, s, "z"), 2))); })
+        .getter("lengthSquared", [v3](VM& vm, const Value& s, Args&) { return Value(std::pow(v3(vm, s, "x"), 2) + std::pow(v3(vm, s, "y"), 2) + std::pow(v3(vm, s, "z"), 2)); })
+        .method("clone", [v3, makeV3](VM& vm, const Value& s, Args&) { return makeV3(vm, v3(vm, s, "x"), v3(vm, s, "y"), v3(vm, s, "z"), v3(vm, s, "w")); })
+        .method("add", [v3, makeV3](VM& vm, const Value& s, Args& a) {
+            return makeV3(vm, v3(vm, s, "x") + v3(vm, arg(a, 0), "x"), v3(vm, s, "y") + v3(vm, arg(a, 0), "y"), v3(vm, s, "z") + v3(vm, arg(a, 0), "z"));
+        })
+        .method("subtract", [v3, makeV3](VM& vm, const Value& s, Args& a) {
+            return makeV3(vm, v3(vm, s, "x") - v3(vm, arg(a, 0), "x"), v3(vm, s, "y") - v3(vm, arg(a, 0), "y"), v3(vm, s, "z") - v3(vm, arg(a, 0), "z"));
+        })
+        .method("dotProduct", [v3](VM& vm, const Value& s, Args& a) {
+            return Value(v3(vm, s, "x") * v3(vm, arg(a, 0), "x") + v3(vm, s, "y") * v3(vm, arg(a, 0), "y") + v3(vm, s, "z") * v3(vm, arg(a, 0), "z"));
+        })
+        .method("crossProduct", [v3, makeV3](VM& vm, const Value& s, Args& a) {
+            const double x = v3(vm, s, "x"), y = v3(vm, s, "y"), z = v3(vm, s, "z");
+            const double ox = v3(vm, arg(a, 0), "x"), oy = v3(vm, arg(a, 0), "y"), oz = v3(vm, arg(a, 0), "z");
+            return makeV3(vm, y * oz - z * oy, z * ox - x * oz, x * oy - y * ox);
+        })
+        .method("normalize", [v3](VM& vm, const Value& s, Args&) {
+            const double l = std::sqrt(std::pow(v3(vm, s, "x"), 2) + std::pow(v3(vm, s, "y"), 2) + std::pow(v3(vm, s, "z"), 2));
+            if (l > 0) for (const char* f : {"x", "y", "z"}) vm.setPublic(s, f, Value(v3(vm, s, f) / l));
+            return Value(l);
+        })
+        .method("scaleBy", [v3](VM& vm, const Value& s, Args& a) {
+            const double k = num(vm, a, 0);
+            for (const char* f : {"x", "y", "z"}) vm.setPublic(s, f, Value(v3(vm, s, f) * k));
+            return Value();
+        })
+        .method("negate", [v3](VM& vm, const Value& s, Args&) {
+            for (const char* f : {"x", "y", "z"}) vm.setPublic(s, f, Value(-v3(vm, s, f)));
+            return Value();
+        })
+        .method("incrementBy", [v3](VM& vm, const Value& s, Args& a) {
+            for (const char* f : {"x", "y", "z"}) vm.setPublic(s, f, Value(v3(vm, s, f) + v3(vm, arg(a, 0), f)));
+            return Value();
+        })
+        .method("decrementBy", [v3](VM& vm, const Value& s, Args& a) {
+            for (const char* f : {"x", "y", "z"}) vm.setPublic(s, f, Value(v3(vm, s, f) - v3(vm, arg(a, 0), f)));
+            return Value();
+        })
+        .method("equals", [v3](VM& vm, const Value& s, Args& a) {
+            for (const char* f : {"x", "y", "z"}) if (v3(vm, s, f) != v3(vm, arg(a, 0), f)) return Value(false);
+            return Value(true);
+        })
+        .method("toString", [v3](VM& vm, const Value& s, Args&) {
+            return Value("Vector3D(" + vm.toString(Value(v3(vm, s, "x"))) + ", " + vm.toString(Value(v3(vm, s, "y"))) + ", " + vm.toString(Value(v3(vm, s, "z"))) + ")");
+        })
+        .staticMethod("distance", [v3](VM& vm, const Value&, Args& a) {
+            return Value(std::sqrt(std::pow(v3(vm, arg(a, 0), "x") - v3(vm, arg(a, 1), "x"), 2) + std::pow(v3(vm, arg(a, 0), "y") - v3(vm, arg(a, 1), "y"), 2) +
+                                   std::pow(v3(vm, arg(a, 0), "z") - v3(vm, arg(a, 1), "z"), 2)));
+        })
+        .staticMethod("angleBetween", [v3](VM& vm, const Value&, Args& a) {
+            const Value p = arg(a, 0), q = arg(a, 1);
+            const double d = v3(vm, p, "x") * v3(vm, q, "x") + v3(vm, p, "y") * v3(vm, q, "y") + v3(vm, p, "z") * v3(vm, q, "z");
+            const double lp = std::sqrt(std::pow(v3(vm, p, "x"), 2) + std::pow(v3(vm, p, "y"), 2) + std::pow(v3(vm, p, "z"), 2));
+            const double lq = std::sqrt(std::pow(v3(vm, q, "x"), 2) + std::pow(v3(vm, q, "y"), 2) + std::pow(v3(vm, q, "z"), 2));
+            return Value(lp * lq == 0 ? 0.0 : std::acos(std::clamp(d / (lp * lq), -1.0, 1.0)));
+        })
+        .staticGetter("X_AXIS", [makeV3](VM& vm, const Value&, Args&) { return makeV3(vm, 1, 0, 0); })
+        .staticGetter("Y_AXIS", [makeV3](VM& vm, const Value&, Args&) { return makeV3(vm, 0, 1, 0); })
+        .staticGetter("Z_AXIS", [makeV3](VM& vm, const Value&, Args&) { return makeV3(vm, 0, 0, 1); });
+
     auto rect = vm.defineNativeClass("flash.geom", "Rectangle", obj);
     ClassBuilder rb{vm, rect};
     rb.ctor([](VM& vm, const Value& self, Args& a) {
@@ -823,12 +1006,7 @@ void installFlashImpl(VM& vm) {
             n->d = d;
             d->as3 = self;
             d->as3Constructed = true; // VM::construct runs the constructor right after this
-            std::uint16_t character = 0;
-            auto& ids = symbolIds(vm.player);
-            for (Class* c = o.cls.get(); c && !character; c = c->super.get()) {
-                auto it = ids.find(c->qualifiedName());
-                if (it != ids.end() && it->second) character = it->second;
-            }
+            const std::uint16_t character = characterForClass(vm.player, o.cls.get());
             o.native = n; // children built below may look the parent up
             if (character) {
                 vm.player.setupDisplay(*d, character, nullptr);
@@ -864,6 +1042,23 @@ void installFlashImpl(VM& vm) {
             [](DisplayObject& d, double v) { d.decompose(); d.yscale = v * 100; d.recompose(); d.dynamicTransform = true; });
     numProp("rotation", [](DisplayObject& d) { d.decompose(); return d.rotation; },
             [](DisplayObject& d, double v) { d.decompose(); d.rotation = std::remainder(v, 360.0); d.recompose(); d.dynamicTransform = true; });
+    {
+        static const char* kBlendNames[] = {"normal", "normal", "layer", "multiply", "screen", "lighten", "darken", "difference",
+                                            "add", "subtract", "invert", "alpha", "erase", "overlay", "hardlight"};
+        dob.property("blendMode",
+            [](VM&, const Value& s, Args&) {
+                auto* d = disp(s);
+                return Value(kBlendNames[d && d->blendMode < 15 ? d->blendMode : 0]);
+            },
+            [](VM& vm, const Value& s, Args& a) {
+                if (auto* d = disp(s)) {
+                    const std::string name = vm.toString(arg(a, 0));
+                    d->blendMode = 0;
+                    for (std::uint8_t i = 2; i < 15; ++i) if (name == kBlendNames[i]) d->blendMode = i;
+                }
+                return Value();
+            });
+    }
     numProp("alpha", [](DisplayObject& d) { return static_cast<double>(d.cxform.mul[3]); }, [](DisplayObject& d, double v) { d.cxform.mul[3] = static_cast<float>(v); });
     auto sizeProp = [&](const char* name, bool width) {
         dob.property(name,
@@ -936,7 +1131,7 @@ void installFlashImpl(VM& vm) {
         return Value();
     });
     // Accepted but not rendered.
-    for (const char* stored : {"filters", "blendMode", "cacheAsBitmap", "mask", "scrollRect", "opaqueBackground", "scale9Grid", "accessibilityProperties"}) {
+    for (const char* stored : {"filters", "cacheAsBitmap", "mask", "scrollRect", "opaqueBackground", "scale9Grid", "accessibilityProperties"}) {
         const std::string key = std::string("__") + stored;
         dob.property(stored,
             [key](VM&, const Value& s, Args&) { Value* v = s.isObject() ? s.o->dynamic.find(key) : nullptr; return v ? *v : Value::null(); },
@@ -1174,7 +1369,12 @@ void installFlashImpl(VM& vm) {
             if (f < 0) {
                 const double n = vm.toNumber(frame);
                 if (!std::isnan(n)) f = static_cast<int>(n) - 1;
-                else vm.throwError("ArgumentError", "Frame label " + frame.s + " not found in scene.");
+                else {
+                    // The Flash Player's constructors for timeline clips shrug this off in practice (the
+                    // Ben 10 button base class calls gotoAndStop("up") on clips labelled "_up"): keep going.
+                    vm.warnOnce("gotoAndStop: frame label '" + frame.s + "' not found");
+                    return;
+                }
             }
         } else {
             f = vm.toInt32(frame) - 1;
@@ -1244,16 +1444,177 @@ void installFlashImpl(VM& vm) {
     ClassBuilder{vm, bitmap}.property("bitmapData", [](VM&, const Value&, Args&) { return Value::null(); }, [](VM&, const Value&, Args&) { return Value(); })
         .property("smoothing", [](VM&, const Value&, Args&) { return Value(false); }, [](VM&, const Value&, Args&) { return Value(); });
     auto bitmapData = vm.defineNativeClass("flash.display", "BitmapData", obj);
-    ClassBuilder{vm, bitmapData}.ctor([](VM& vm, const Value& s, Args& a) {
-        s.o->dynamic.set("width", Value(num(vm, a, 0)));
-        s.o->dynamic.set("height", Value(num(vm, a, 1)));
+    bitmapData->sealed = false;
+    ClassBuilder bd{vm, bitmapData};
+    bd.init([](VM&, Object& o) { o.native = std::make_shared<BitmapDataNative>(); });
+    bd.ctor([](VM& vm, const Value& s, Args& a) {
+        auto b = bitmapOf(s);
+        const int w = static_cast<int>(num(vm, a, 0)), h = static_cast<int>(num(vm, a, 1));
+        if (w < 1 || h < 1 || w > 8191 || h > 8191) vm.throwError("ArgumentError", "Error #2015: Invalid BitmapData.");
+        b->w = w;
+        b->h = h;
+        b->transparent = a.size() < 3 || vm.toBoolean(a[2]);
+        const std::uint32_t fill = a.size() > 3 ? vm.toUint32(a[3]) : 0xffffffffu;
+        b->px.assign(static_cast<std::size_t>(w) * h, b->transparent ? fill : (fill | 0xff000000u));
         return Value();
     });
-    for (const char* m : {"draw", "dispose", "fillRect", "copyPixels", "setPixel", "setPixel32", "lock", "unlock", "applyFilter", "colorTransform"}) {
-        ClassBuilder{vm, bitmapData}.method(m, [](VM&, const Value&, Args&) { return Value(); });
-    }
-    ClassBuilder{vm, bitmapData}.method("getPixel", [](VM&, const Value&, Args&) { return Value(0); }).method("getPixel32", [](VM&, const Value&, Args&) { return Value(0); });
-    bitmapData->sealed = false;
+    auto liveBitmap = [](VM& vm, const Value& s) {
+        auto b = bitmapOf(s);
+        if (!b || b->px.empty()) vm.throwError("ArgumentError", "Error #2015: Invalid BitmapData.");
+        return b;
+    };
+    bd.getter("width", [liveBitmap](VM& vm, const Value& s, Args&) { return Value(liveBitmap(vm, s)->w); })
+        .getter("height", [liveBitmap](VM& vm, const Value& s, Args&) { return Value(liveBitmap(vm, s)->h); })
+        .getter("transparent", [liveBitmap](VM& vm, const Value& s, Args&) { return Value(liveBitmap(vm, s)->transparent); })
+        .getter("rect", [liveBitmap](VM& vm, const Value& s, Args&) {
+            auto b = liveBitmap(vm, s);
+            return makeRectangle(vm, 0, 0, b->w, b->h);
+        })
+        .method("dispose", [](VM&, const Value& s, Args&) {
+            if (auto b = bitmapOf(s)) { b->px.clear(); b->px.shrink_to_fit(); }
+            return Value();
+        })
+        .method("lock", [](VM&, const Value&, Args&) { return Value(); })
+        .method("unlock", [](VM&, const Value&, Args&) { return Value(); })
+        .method("applyFilter", [](VM&, const Value&, Args&) { return Value(); })
+        .method("clone", [liveBitmap](VM& vm, const Value& s, Args&) {
+            auto b = liveBitmap(vm, s);
+            Value copy = vm.construct(Value(vm.findClass("flash.display::BitmapData")), {Value(b->w), Value(b->h), Value(b->transparent), Value(0)});
+            *bitmapOf(copy) = *b;
+            return copy;
+        })
+        .method("getPixel", [liveBitmap](VM& vm, const Value& s, Args& a) {
+            auto b = liveBitmap(vm, s);
+            const int x = static_cast<int>(num(vm, a, 0)), y = static_cast<int>(num(vm, a, 1));
+            return Value(x < 0 || y < 0 || x >= b->w || y >= b->h ? 0.0 : static_cast<double>(b->at(x, y) & 0xffffffu));
+        })
+        .method("getPixel32", [liveBitmap](VM& vm, const Value& s, Args& a) {
+            auto b = liveBitmap(vm, s);
+            const int x = static_cast<int>(num(vm, a, 0)), y = static_cast<int>(num(vm, a, 1));
+            return Value(x < 0 || y < 0 || x >= b->w || y >= b->h ? 0.0 : static_cast<double>(b->at(x, y)));
+        })
+        .method("setPixel", [liveBitmap](VM& vm, const Value& s, Args& a) {
+            auto b = liveBitmap(vm, s);
+            const int x = static_cast<int>(num(vm, a, 0)), y = static_cast<int>(num(vm, a, 1));
+            if (x >= 0 && y >= 0 && x < b->w && y < b->h) b->at(x, y) = (b->at(x, y) & 0xff000000u) | (vm.toUint32(arg(a, 2)) & 0xffffffu);
+            return Value();
+        })
+        .method("setPixel32", [liveBitmap](VM& vm, const Value& s, Args& a) {
+            auto b = liveBitmap(vm, s);
+            const int x = static_cast<int>(num(vm, a, 0)), y = static_cast<int>(num(vm, a, 1));
+            if (x >= 0 && y >= 0 && x < b->w && y < b->h) {
+                const std::uint32_t c = vm.toUint32(arg(a, 2));
+                b->at(x, y) = b->transparent ? c : (c | 0xff000000u);
+            }
+            return Value();
+        })
+        .method("fillRect", [liveBitmap](VM& vm, const Value& s, Args& a) {
+            auto b = liveBitmap(vm, s);
+            const Value r = arg(a, 0);
+            if (!r.isObject()) return Value();
+            const int x0 = static_cast<int>(vm.toNumber(vm.getPublic(r, "x"))), y0 = static_cast<int>(vm.toNumber(vm.getPublic(r, "y")));
+            const int x1 = x0 + static_cast<int>(vm.toNumber(vm.getPublic(r, "width"))), y1 = y0 + static_cast<int>(vm.toNumber(vm.getPublic(r, "height")));
+            std::uint32_t c = vm.toUint32(arg(a, 1));
+            if (!b->transparent) c |= 0xff000000u;
+            for (int y = std::max(0, y0); y < std::min(b->h, y1); ++y)
+                for (int x = std::max(0, x0); x < std::min(b->w, x1); ++x) b->at(x, y) = c;
+            return Value();
+        })
+        .method("copyPixels", [liveBitmap](VM& vm, const Value& s, Args& a) {
+            auto b = liveBitmap(vm, s);
+            auto src = bitmapOf(arg(a, 0));
+            const Value r = arg(a, 1), pt = arg(a, 2);
+            if (!src || !r.isObject() || !pt.isObject()) return Value();
+            const int sx = static_cast<int>(vm.toNumber(vm.getPublic(r, "x"))), sy = static_cast<int>(vm.toNumber(vm.getPublic(r, "y")));
+            const int w = static_cast<int>(vm.toNumber(vm.getPublic(r, "width"))), h = static_cast<int>(vm.toNumber(vm.getPublic(r, "height")));
+            const int dx = static_cast<int>(vm.toNumber(vm.getPublic(pt, "x"))), dy = static_cast<int>(vm.toNumber(vm.getPublic(pt, "y")));
+            for (int y = 0; y < h; ++y) {
+                for (int x = 0; x < w; ++x) {
+                    const int px = sx + x, py = sy + y, qx = dx + x, qy = dy + y;
+                    if (px < 0 || py < 0 || px >= src->w || py >= src->h || qx < 0 || qy < 0 || qx >= b->w || qy >= b->h) continue;
+                    b->at(qx, qy) = b->transparent ? src->at(px, py) : blendPixel(b->at(qx, qy), src->at(px, py), BlendMode::Normal);
+                }
+            }
+            return Value();
+        })
+        .method("colorTransform", [liveBitmap](VM& vm, const Value& s, Args& a) {
+            auto b = liveBitmap(vm, s);
+            const Value r = arg(a, 0);
+            const ColorXform ct = readColorXform(vm, arg(a, 1));
+            if (!r.isObject()) return Value();
+            const int x0 = static_cast<int>(vm.toNumber(vm.getPublic(r, "x"))), y0 = static_cast<int>(vm.toNumber(vm.getPublic(r, "y")));
+            const int x1 = x0 + static_cast<int>(vm.toNumber(vm.getPublic(r, "width"))), y1 = y0 + static_cast<int>(vm.toNumber(vm.getPublic(r, "height")));
+            for (int y = std::max(0, y0); y < std::min(b->h, y1); ++y)
+                for (int x = std::max(0, x0); x < std::min(b->w, x1); ++x) b->at(x, y) = ct.apply(b->at(x, y));
+            return Value();
+        })
+        .method("getColorBoundsRect", [liveBitmap](VM& vm, const Value& s, Args& a) {
+            auto b = liveBitmap(vm, s);
+            const std::uint32_t mask = vm.toUint32(arg(a, 0)), color = vm.toUint32(arg(a, 1));
+            const bool findColor = a.size() < 3 || vm.toBoolean(a[2]);
+            int minX = b->w, minY = b->h, maxX = -1, maxY = -1;
+            for (int y = 0; y < b->h; ++y) {
+                for (int x = 0; x < b->w; ++x) {
+                    const bool match = (b->at(x, y) & mask) == (color & mask);
+                    if (match == findColor) {
+                        minX = std::min(minX, x); maxX = std::max(maxX, x);
+                        minY = std::min(minY, y); maxY = std::max(maxY, y);
+                    }
+                }
+            }
+            if (maxX < 0) return makeRectangle(vm, 0, 0, 0, 0);
+            return makeRectangle(vm, minX, minY, maxX - minX + 1, maxY - minY + 1);
+        })
+        .method("draw", [liveBitmap](VM& vm, const Value& s, Args& a) {
+            auto b = liveBitmap(vm, s);
+            const Value source = arg(a, 0);
+            // Matrix of the call: source content space (pixels) -> bitmap pixels.
+            double m[6] = {1, 0, 0, 1, 0, 0};
+            if (arg(a, 1).isObject()) {
+                const Value mx = arg(a, 1);
+                const char* names[6] = {"a", "b", "c", "d", "tx", "ty"};
+                for (int i = 0; i < 6; ++i) m[i] = vm.toNumber(vm.getPublic(mx, names[i]));
+            }
+            const ColorXform ct = readColorXform(vm, arg(a, 2));
+            BlendMode mode = BlendMode::Normal;
+            if (arg(a, 3).isString()) {
+                if (arg(a, 3).s == "difference") mode = BlendMode::Difference;
+                else if (arg(a, 3).s == "add") mode = BlendMode::Add;
+                else if (arg(a, 3).s == "multiply") mode = BlendMode::Multiply;
+                else if (arg(a, 3).s == "subtract") mode = BlendMode::Subtract;
+            }
+            std::vector<std::uint32_t> pixels;
+            int sw = b->w, sh = b->h;
+            if (auto sb = bitmapOf(source)) {
+                // Bitmap source: nearest-neighbour through the inverse matrix.
+                const double det = m[0] * m[3] - m[1] * m[2];
+                if (det == 0) return Value();
+                pixels.assign(static_cast<std::size_t>(sw) * sh, 0);
+                for (int y = 0; y < sh; ++y) {
+                    for (int x = 0; x < sw; ++x) {
+                        const double dx = x + 0.5 - m[4], dy = y + 0.5 - m[5];
+                        const int ux = static_cast<int>(std::floor((m[3] * dx - m[2] * dy) / det));
+                        const int uy = static_cast<int>(std::floor((-m[1] * dx + m[0] * dy) / det));
+                        if (ux >= 0 && uy >= 0 && ux < sb->w && uy < sb->h) pixels[static_cast<std::size_t>(y) * sw + x] = sb->at(ux, uy);
+                    }
+                }
+            } else if (auto* d = disp(source)) {
+                if (!vm.player.renderObject) return Value();
+                const Matrix total{static_cast<float>(m[0] / 20), static_cast<float>(m[1] / 20), static_cast<float>(m[2] / 20),
+                                   static_cast<float>(m[3] / 20), static_cast<float>(m[4]), static_cast<float>(m[5])};
+                if (!vm.player.renderObject(*d, total, sw, sh, pixels)) return Value();
+            } else {
+                return Value();
+            }
+            for (std::size_t i = 0; i < pixels.size(); ++i) {
+                if ((pixels[i] >> 24) == 0 && ct.isIdentity()) continue;
+                const std::uint32_t src = ct.apply(pixels[i]);
+                if ((src >> 24) == 0) continue;
+                b->px[i] = blendPixel(b->px[i], src, mode);
+                if (!b->transparent) b->px[i] |= 0xff000000u;
+            }
+            return Value();
+        });
 
     auto simpleButton = vm.defineNativeClass("flash.display", "SimpleButton", interactive);
     ClassBuilder{vm, simpleButton}
@@ -1324,7 +1685,7 @@ void installFlashImpl(VM& vm) {
     // Loader / LoaderInfo: external content cannot be loaded; requests fail asynchronously.
     auto loaderInfo = vm.defineNativeClass("flash.display", "LoaderInfo", dispatcher);
     ClassBuilder lib{vm, loaderInfo};
-    lib.getter("url", [](VM&, const Value&, Args&) { return Value("file:///game.swf"); })
+    lib.getter("url", [](VM&, const Value& s, Args&) { Value* u = s.o->dynamic.find("__url"); return u ? *u : Value("file:///game.swf"); })
         .getter("loaderURL", [](VM&, const Value&, Args&) { return Value("file:///game.swf"); })
         .getter("bytesLoaded", [](VM&, const Value&, Args&) { return Value(1000000); })
         .getter("bytesTotal", [](VM&, const Value&, Args&) { return Value(1000000); })
@@ -1340,9 +1701,16 @@ void installFlashImpl(VM& vm) {
             s.o->dynamic.set("__params", p);
             return p;
         })
-        .getter("content", [](VM& vm, const Value&, Args&) { return displayValue(vm, vm.player.rootHolder.get()); })
-        .getter("loader", [](VM&, const Value&, Args&) { return Value::null(); })
-        .getter("applicationDomain", [](VM& vm, const Value&, Args&) { return vm.getPublic(Value(vm.findClass("flash.system::ApplicationDomain")), "currentDomain"); })
+        .getter("content", [](VM& vm, const Value& s, Args&) {
+            if (Value* c = s.o->dynamic.find("__content")) return *c;
+            if (s.o->dynamic.find("__loader")) return Value::null(); // a Loader's info before/without content
+            return displayValue(vm, vm.player.rootHolder.get());
+        })
+        .getter("loader", [](VM&, const Value& s, Args&) { Value* l = s.o->dynamic.find("__loader"); return l ? *l : Value::null(); })
+        .getter("applicationDomain", [](VM& vm, const Value& s, Args&) {
+            Value* d = s.o->dynamic.find("__domain");
+            return domainObject(vm, d ? static_cast<int>(d->n) : vm.currentDomain());
+        })
         .getter("sharedEvents", [](VM& vm, const Value& s, Args&) {
             if (Value* p = s.o->dynamic.find("__shared")) return *p;
             Value p = vm.construct(Value(vm.findClass("flash.events::EventDispatcher")), {});
@@ -1375,10 +1743,54 @@ void installFlashImpl(VM& vm) {
             s.o->dynamic.set("__info", p);
             return p;
         })
-        .getter("content", [](VM&, const Value&, Args&) { return Value::null(); })
-        .method("load", [failLater](VM& vm, const Value& s, Args&) {
-            vm.warnOnce("Loader.load: external content is not available offline");
-            failLater(vm, vm.getPublic(s, "contentLoaderInfo").o);
+        .getter("content", [](VM& vm, const Value& s, Args&) {
+            Value* c = s.o->dynamic.find("__content");
+            return c ? *c : Value::null();
+        })
+        .method("load", [failLater](VM& vm, const Value& s, Args& a) {
+            const std::string url = vm.toString(vm.getPublic(arg(a, 0), "url"));
+            int domain = -1; // a fresh application domain unless the LoaderContext names one
+            if (arg(a, 1).isObject()) {
+                const int d = domainIdOf(vm.getPublic(arg(a, 1), "applicationDomain"));
+                if (d >= 0) domain = d;
+            }
+            Player::LoadedSwf loaded;
+            std::string err;
+            auto info = vm.getPublic(s, "contentLoaderInfo");
+            if (!vm.player.loadSwf(url, domain, loaded, err)) {
+                vm.warnOnce("Loader.load: " + err);
+                failLater(vm, info.o);
+                return Value();
+            }
+            info.o->dynamic.set("__url", Value(url));
+            info.o->dynamic.set("__loader", s);
+            info.o->dynamic.set("__domain", Value(static_cast<double>(loaded.domain)));
+            // Flash delivers the loaded content asynchronously.
+            VM::Timer t;
+            t.once = true;
+            t.next = vm.nowMs() + 30;
+            t.id = vm.nextTimerId++;
+            ObjectPtr loaderObj = s.o, infoObj = info.o;
+            const int base = loaded.base;
+            t.fn = Value(vm.newFunction([loaderObj, infoObj, base](VM& vm, const Value&, Args&) {
+                auto holder = std::make_shared<DisplayObject>();
+                vm.player.setupDisplay(*holder, static_cast<std::uint16_t>(base), nullptr);
+                as3ClipCreated(vm.player, *holder);
+                Value content(holder->as3);
+                infoObj->dynamic.set("__content", content);
+                loaderObj->dynamic.set("__content", content);
+                try { vm.callPublic(Value(loaderObj), "addChild", {content}); } catch (const ScriptException& e) { vm.reportError("Loader.addChild", e); }
+                auto progress = vm.makeEvent("flash.events::ProgressEvent", "progress", false);
+                if (auto e = std::dynamic_pointer_cast<EventData>(progress->native)) {
+                    e->extra["bytesLoaded"] = Value(1000000);
+                    e->extra["bytesTotal"] = Value(1000000);
+                }
+                vm.dispatchEvent(infoObj, progress);
+                vm.dispatchEvent(infoObj, vm.makeEvent("flash.events::Event", "init", false));
+                vm.dispatchEvent(infoObj, vm.makeEvent("flash.events::Event", "complete", false));
+                return Value();
+            }));
+            vm.timers[t.id] = t;
             return Value();
         })
         .method("loadBytes", [failLater](VM& vm, const Value& s, Args&) {
@@ -1634,11 +2046,8 @@ void installFlashImpl(VM& vm) {
             // An embedded sound is a Sound subclass exported under the DefineSound's class name.
             auto d = soundOf(self);
             if (!d) return Value();
-            auto& ids = symbolIds(vm.player);
-            for (Class* c = self.o->cls.get(); c; c = c->super.get()) {
-                const auto it = ids.find(c->qualifiedName());
-                if (it != ids.end() && vm.player.movie.sounds.count(it->second)) { d->soundId = it->second; break; }
-            }
+            const auto id = characterForClass(vm.player, self.o->cls.get());
+            if (id && vm.player.movie.sounds.count(id)) d->soundId = id;
             return Value();
         })
         .method("play", [mixOf](VM& vm, const Value& self, Args& a) {
@@ -1727,13 +2136,58 @@ void installFlashImpl(VM& vm) {
     });
     auto urlLoader = vm.defineNativeClass("flash.net", "URLLoader", dispatcher);
     ClassBuilder{vm, urlLoader}
-        .method("load", [failLater](VM& vm, const Value& s, Args&) { vm.warnOnce("URLLoader.load: network is offline"); failLater(vm, s.o); return Value(); })
+        .method("load", [failLater](VM& vm, const Value& s, Args& a) {
+            const std::string url = vm.toString(vm.getPublic(arg(a, 0), "url"));
+            std::vector<std::uint8_t> bytes;
+            if (!vm.player.readDataFile(url, bytes)) {
+                vm.warnOnce("URLLoader.load: " + url + " is not bundled with the game");
+                failLater(vm, s.o);
+                return Value();
+            }
+            Value* fmt = s.o->dynamic.find("__format");
+            const std::string format = fmt ? vm.toString(*fmt) : "text";
+            Value data;
+            if (format == "binary") {
+                data = vm.construct(Value(vm.findClass("flash.utils::ByteArray")), {});
+                for (auto b : bytes) vm.callPublic(data, "writeByte", {Value(static_cast<int>(b))});
+                vm.setPublic(data, "position", Value(0));
+            } else {
+                std::size_t start = bytes.size() >= 3 && bytes[0] == 0xef && bytes[1] == 0xbb && bytes[2] == 0xbf ? 3 : 0; // UTF-8 BOM
+                data = Value(std::string(bytes.begin() + static_cast<std::ptrdiff_t>(start), bytes.end()));
+                if (format == "variables") {
+                    auto vars = vm.construct(Value(vm.findClass("flash.net::URLVariables")), {});
+                    vm.callPublic(vars, "decode", {data});
+                    data = vars;
+                }
+            }
+            s.o->dynamic.set("__total", Value(static_cast<double>(bytes.size())));
+            VM::Timer t;
+            t.once = true;
+            t.next = vm.nowMs() + 30;
+            t.id = vm.nextTimerId++;
+            ObjectPtr target = s.o;
+            t.fn = Value(vm.newFunction([target, data, size = bytes.size()](VM& vm, const Value&, Args&) {
+                target->dynamic.set("__data", data);
+                vm.dispatchEvent(target, vm.makeEvent("flash.events::Event", "open", false));
+                auto progress = vm.makeEvent("flash.events::ProgressEvent", "progress", false);
+                if (auto e = std::dynamic_pointer_cast<EventData>(progress->native)) {
+                    e->extra["bytesLoaded"] = Value(static_cast<double>(size));
+                    e->extra["bytesTotal"] = Value(static_cast<double>(size));
+                }
+                vm.dispatchEvent(target, progress);
+                vm.dispatchEvent(target, vm.makeEvent("flash.events::Event", "complete", false));
+                return Value();
+            }));
+            vm.timers[t.id] = t;
+            return Value();
+        })
         .method("close", [](VM&, const Value&, Args&) { return Value(); })
         .property("data", [](VM&, const Value& s, Args&) { Value* v = s.o->dynamic.find("__data"); return v ? *v : Value(); },
                   [](VM&, const Value& s, Args& a) { s.o->dynamic.set("__data", arg(a, 0)); return Value(); })
-        .property("dataFormat", [](VM&, const Value&, Args&) { return Value("text"); }, [](VM&, const Value&, Args&) { return Value(); })
-        .getter("bytesLoaded", [](VM&, const Value&, Args&) { return Value(0); })
-        .getter("bytesTotal", [](VM&, const Value&, Args&) { return Value(0); });
+        .property("dataFormat", [](VM&, const Value& s, Args&) { Value* v = s.o->dynamic.find("__format"); return v ? *v : Value("text"); },
+                  [](VM&, const Value& s, Args& a) { s.o->dynamic.set("__format", arg(a, 0)); return Value(); })
+        .getter("bytesLoaded", [](VM&, const Value& s, Args&) { Value* v = s.o->dynamic.find("__total"); return v ? *v : Value(0); })
+        .getter("bytesTotal", [](VM&, const Value& s, Args&) { Value* v = s.o->dynamic.find("__total"); return v ? *v : Value(0); });
     for (auto [cls, consts] : std::initializer_list<std::pair<const char*, std::initializer_list<std::pair<const char*, const char*>>>>{
              {"URLRequestMethod", {{"GET", "GET"}, {"POST", "POST"}}},
              {"URLLoaderDataFormat", {{"TEXT", "text"}, {"BINARY", "binary"}, {"VARIABLES", "variables"}}}}) {
@@ -1796,17 +2250,24 @@ void installFlashImpl(VM& vm) {
     }
     auto appDomain = vm.defineNativeClass("flash.system", "ApplicationDomain", obj);
     ClassBuilder{vm, appDomain}
-        .staticGetter("currentDomain", [](VM& vm, const Value&, Args&) {
-            static ObjectPtr domain;
-            if (!domain) domain = vm.construct(Value(vm.findClass("flash.system::ApplicationDomain")), {}).o;
-            return Value(domain);
+        .init([](VM&, Object& o) { o.native = std::make_shared<DomainData>(); })
+        // new ApplicationDomain(parent) makes a fresh domain; (0, true) is the internal wrapper form.
+        .ctor([](VM& vm, const Value& self, Args& a) {
+            auto d = std::dynamic_pointer_cast<DomainData>(self.o->native);
+            if (d && !(a.size() == 2 && a[1].isBoolean() && a[1].b)) d->domain = vm.newDomain();
+            return Value();
         })
-        .method("getDefinition", [](VM& vm, const Value&, Args& a) {
-            auto c = vm.findClass(vm.toString(arg(a, 0)));
-            if (!c) vm.throwError("ReferenceError", "Variable " + vm.toString(arg(a, 0)) + " is not defined.");
+        .staticGetter("currentDomain", [](VM& vm, const Value&, Args&) { return domainObject(vm, vm.currentDomain()); })
+        .staticGetter("parentDomain", [](VM&, const Value&, Args&) { return Value::null(); })
+        .method("getDefinition", [](VM& vm, const Value& self, Args& a) {
+            const int dom = std::max(0, domainIdOf(self));
+            auto c = vm.findClassIn(vm.toString(arg(a, 0)), dom);
+            if (!c) vm.throwError("ReferenceError", "Error #1065: Variable " + vm.toString(arg(a, 0)) + " is not defined.");
             return Value(c);
         })
-        .method("hasDefinition", [](VM& vm, const Value&, Args& a) { return Value(vm.findClass(vm.toString(arg(a, 0))) != nullptr); });
+        .method("hasDefinition", [](VM& vm, const Value& self, Args& a) {
+            return Value(vm.findClassIn(vm.toString(arg(a, 0)), std::max(0, domainIdOf(self))) != nullptr);
+        });
     for (const char* n : {"LoaderContext", "SecurityDomain", "SecurityPanel", "IME"}) vm.defineNativeClass("flash.system", n, obj)->sealed = false;
     auto system = vm.defineNativeClass("flash.system", "System", obj);
     ClassBuilder{vm, system}.staticGetter("totalMemory", [](VM&, const Value&, Args&) { return Value(64.0 * 1024 * 1024); })

@@ -61,6 +61,11 @@ else()
   endif()
 endif()
 
+# Multi-file games keep their other SWF packs and data files in data/ next to movie.pack.
+if (EXISTS ${CMAKE_SOURCE_DIR}/data)
+  add_custom_command(TARGET flash_game POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/data $<TARGET_FILE_DIR:flash_game>/data)
+endif()
 # The runtime loads movie.pack from the executable's directory.
 add_custom_command(TARGET flash_game POST_BUILD
   COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_SOURCE_DIR}/movie.pack $<TARGET_FILE_DIR:flash_game>/movie.pack)

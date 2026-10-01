@@ -313,6 +313,47 @@ void installBuiltinsImpl(VM& vm) {
         return sortArray(vm, arr, keys, options, Value());
     });
 
+    // ---- Vector.<T>: type-erased; behaves like an Array (applytype leaves the base class on the stack)
+    {
+        auto vector = vm.defineNativeClass("__AS3__.vec", "Vector", vm.arrayClass);
+        vector->allocator = [](VM&) -> ObjectPtr { return std::make_shared<ArrayObject>(); };
+        vector->callAsFunction = [](VM& vm, Args& a) {
+            auto arr = vm.newArray();
+            if (auto src = a.empty() ? nullptr : asArray(a[0])) arr->items = src->items;
+            return Value(arr);
+        };
+        ClassBuilder vb{vm, vector};
+        vb.ctor([](VM& vm, const Value& self, Args& a) {
+            auto arr = asArray(self);
+            if (!arr) return Value();
+            const double n = a.empty() ? 0.0 : vm.toNumber(a[0]);
+            // Elements start as null: it converts to 0 in arithmetic like the numeric defaults do.
+            arr->items.assign(static_cast<std::size_t>(std::max(0.0, std::min(std::isnan(n) ? 0.0 : n, 1e8))), Value::null());
+            return Value();
+        });
+        vb.property("fixed", [](VM&, const Value&, Args&) { return Value(false); }, [](VM&, const Value&, Args&) { return Value(); });
+        vb.method("insertAt", [](VM& vm, const Value& self, Args& a) {
+            if (auto arr = asArray(self)) {
+                int i = vm.toInt32(arg(a, 0));
+                if (i < 0) i += static_cast<int>(arr->items.size());
+                i = std::clamp(i, 0, static_cast<int>(arr->items.size()));
+                arr->items.insert(arr->items.begin() + i, arg(a, 1));
+            }
+            return Value();
+        });
+        vb.method("removeAt", [](VM& vm, const Value& self, Args& a) {
+            auto arr = asArray(self);
+            if (!arr) return Value();
+            int i = vm.toInt32(arg(a, 0));
+            if (i < 0) i += static_cast<int>(arr->items.size());
+            if (i < 0 || i >= static_cast<int>(arr->items.size())) return Value();
+            Value v = arr->items[static_cast<std::size_t>(i)];
+            arr->items.erase(arr->items.begin() + i);
+            return v;
+        });
+        vm.defineGlobal("", "Vector", Value(vector)); // code compiled without the vec package namespace
+    }
+
     // ---- String
     vm.stringClass = vm.defineNativeClass("", "String", vm.objectClass);
     vm.stringClass->callAsFunction = [](VM& vm, Args& a) { return Value(a.empty() ? std::string() : vm.toString(a[0])); };
@@ -675,7 +716,8 @@ void installBuiltinsImpl(VM& vm) {
 
     // XML / RegExp: not used by the target games; provide inert constructors so class
     // definitions that mention them still load.
-    for (auto* n : {"XML", "XMLList", "RegExp", "QName"}) vm.defineNativeClass("", n, vm.objectClass);
+    for (auto* n : {"RegExp", "QName"}) vm.defineNativeClass("", n, vm.objectClass);
+    installXml(vm);
 }
 
 } // namespace fp::avm2

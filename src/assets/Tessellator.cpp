@@ -63,6 +63,8 @@ struct Painter {
     Inverse inv;
     double uScale = 1, vScale = 1, uOffset = 0, vOffset = 0;
     bool linear = false;
+    bool tile = false;   // repeating bitmap / repeating or reflecting gradient: UVs wrap
+    bool mirror = false; // reflecting gradient: odd tiles are flipped
 
     MeshVertex vertex(double x, double y) const {
         MeshVertex v;
@@ -87,7 +89,7 @@ Painter makePainter(const FillStyle& f, const std::map<std::uint16_t, BitmapInfo
     switch (f.type) {
         case FillStyle::Type::Solid:
             p.color = f.color;
-            drawable = f.color.a > 0;
+            drawable = true; // alpha-0 fills still count for hit testing (invisible hit areas)
             break;
         case FillStyle::Type::Linear:
         case FillStyle::Type::Radial:
@@ -98,6 +100,8 @@ Painter makePainter(const FillStyle& f, const std::map<std::uint16_t, BitmapInfo
             p.linear = f.type == FillStyle::Type::Linear;
             p.uScale = p.vScale = 1.0 / (2 * kGradientHalf);
             p.uOffset = p.vOffset = 0.5;
+            p.tile = f.spread != 0; // 0 pad, 1 reflect, 2 repeat
+            p.mirror = f.spread == 1;
             break;
         case FillStyle::Type::Bitmap: {
             const auto it = bitmaps.find(f.bitmapId);
@@ -106,10 +110,102 @@ Painter makePainter(const FillStyle& f, const std::map<std::uint16_t, BitmapInfo
             p.texture = f.bitmapId;
             p.uScale = 1.0 / it->second.width;
             p.vScale = 1.0 / it->second.height;
+            p.tile = f.repeat;
             break;
         }
     }
     return p;
+}
+
+
+// ---- UV tiling -------------------------------------------------------------------------
+// SDL_RenderGeometry cannot wrap texture coordinates, so triangles of repeating fills are cut
+// along the integer UV lines and every piece is remapped into one [0,1] cell.
+
+struct TV { double x, y, u, v; };
+
+// Clips a convex polygon to u <= k (keepLow) or u >= k (!keepLow); `axisV` selects v instead of u.
+std::vector<TV> clipPoly(const std::vector<TV>& poly, bool axisV, double k, bool keepLow) {
+    std::vector<TV> out;
+    auto val = [&](const TV& t) { return axisV ? t.v : t.u; };
+    auto inside = [&](const TV& t) { return keepLow ? val(t) <= k : val(t) >= k; };
+    for (std::size_t i = 0; i < poly.size(); ++i) {
+        const TV& a = poly[i];
+        const TV& b = poly[(i + 1) % poly.size()];
+        const bool ia = inside(a), ib = inside(b);
+        if (ia) out.push_back(a);
+        if (ia != ib) {
+            const double t = (k - val(a)) / (val(b) - val(a));
+            out.push_back({a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, a.u + (b.u - a.u) * t, a.v + (b.v - a.v) * t});
+        }
+    }
+    return out;
+}
+
+void splitPoly(const std::vector<TV>& poly, std::vector<std::vector<TV>>& out, int& budget) {
+    if (poly.size() < 3 || budget <= 0) return;
+    constexpr double eps = 1e-6;
+    double umin = 1e300, umax = -1e300, vmin = 1e300, vmax = -1e300;
+    for (const auto& t : poly) {
+        umin = std::min(umin, t.u); umax = std::max(umax, t.u);
+        vmin = std::min(vmin, t.v); vmax = std::max(vmax, t.v);
+    }
+    for (int axis = 0; axis < 2; ++axis) {
+        const double lo = axis ? vmin : umin, hi = axis ? vmax : umax;
+        const double k = std::floor(lo + eps) + 1;
+        if (k < hi - eps) {
+            --budget;
+            splitPoly(clipPoly(poly, axis == 1, k, true), out, budget);
+            splitPoly(clipPoly(poly, axis == 1, k, false), out, budget);
+            return;
+        }
+    }
+    out.push_back(poly);
+}
+
+void tileTriangles(Mesh& m, std::size_t firstIndex, bool mirror) {
+    std::vector<std::uint32_t> keep(m.indices.begin(), m.indices.begin() + static_cast<std::ptrdiff_t>(firstIndex));
+    const std::vector<std::uint32_t> tris(m.indices.begin() + static_cast<std::ptrdiff_t>(firstIndex), m.indices.end());
+    m.indices = std::move(keep);
+    for (std::size_t i = 0; i + 2 < tris.size(); i += 3) {
+        const MeshVertex& a = m.vertices[tris[i]];
+        const MeshVertex& b = m.vertices[tris[i + 1]];
+        const MeshVertex& c = m.vertices[tris[i + 2]];
+        const double umin = std::min({a.u, b.u, c.u}), umax = std::max({a.u, b.u, c.u});
+        const double vmin = std::min({a.v, b.v, c.v}), vmax = std::max({a.v, b.v, c.v});
+        if (umin >= -1e-6 && umax <= 1 + 1e-6 && vmin >= -1e-6 && vmax <= 1 + 1e-6) { // already inside one cell
+            for (int k = 0; k < 3; ++k) m.indices.push_back(tris[i + k]);
+            continue;
+        }
+        std::vector<std::vector<TV>> pieces;
+        int budget = 20000; // cuts per triangle: tiny bitmaps over huge shapes fall back to clamping
+        splitPoly({{a.x, a.y, a.u, a.v}, {b.x, b.y, b.u, b.v}, {c.x, c.y, c.u, c.v}}, pieces, budget);
+        if (budget <= 0) { // too fine: keep the original (clamped) triangle
+            for (int k = 0; k < 3; ++k) m.indices.push_back(tris[i + k]);
+            continue;
+        }
+        for (const auto& poly : pieces) {
+            double uc = 0, vc = 0;
+            for (const auto& t : poly) { uc += t.u; vc += t.v; }
+            const double cu = std::floor(uc / poly.size()), cv = std::floor(vc / poly.size());
+            const bool flipU = mirror && (static_cast<long long>(cu) & 1), flipV = mirror && (static_cast<long long>(cv) & 1);
+            const auto base = static_cast<std::uint32_t>(m.vertices.size());
+            for (const auto& t : poly) {
+                MeshVertex v = a; // colour is constant across the fill
+                v.x = static_cast<float>(t.x);
+                v.y = static_cast<float>(t.y);
+                double lu = std::clamp(t.u - cu, 0.0, 1.0), lv = std::clamp(t.v - cv, 0.0, 1.0);
+                v.u = static_cast<float>(flipU ? 1 - lu : lu);
+                v.v = static_cast<float>(flipV ? 1 - lv : lv);
+                m.vertices.push_back(v);
+            }
+            for (std::uint32_t k = 1; k + 1 < poly.size(); ++k) {
+                m.indices.push_back(base);
+                m.indices.push_back(base + k);
+                m.indices.push_back(base + k + 1);
+            }
+        }
+    }
 }
 
 void addQuad(Mesh& m, const Painter& p, Pt a, Pt b, Pt c, Pt d) {
@@ -333,7 +429,10 @@ std::vector<Mesh> tessellateShape(const Shape& shape, const std::map<std::uint16
                     else segs.push_back({b.x, b.y, a.x, a.y, -1});
                 }
             }
-            SlabFiller(meshFor(painter.texture), painter, shape.evenOdd).fill(std::move(segs));
+            Mesh& fillMesh = meshFor(painter.texture);
+            const std::size_t firstIndex = fillMesh.indices.size();
+            SlabFiller(fillMesh, painter, shape.evenOdd).fill(std::move(segs));
+            if (painter.tile) tileTriangles(fillMesh, firstIndex, painter.mirror);
         }
         for (const auto& path : g.linePaths) {
             if (path.style >= g.lines.size()) continue;

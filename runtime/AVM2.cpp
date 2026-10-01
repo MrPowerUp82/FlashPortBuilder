@@ -1,5 +1,7 @@
 #include "AVM2.hpp"
 #include <algorithm>
+#include <exception>
+#include <exception>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -54,6 +56,17 @@ const Trait* TraitTable::find(const Multiname& mn) const {
         if (nsMatches(t.ns, mn.nss)) {
             best = &t;
             break;
+        }
+    }
+    if (!best) {
+        // Interface methods are named in the interface's own namespace ("pkg:IFoo"); an implementing
+        // class provides them under the same local name in its public namespace.
+        for (const auto& ns : mn.nss) {
+            if (ns.kind == NsKind::Private || ns.uri.find(':') == std::string::npos) continue;
+            for (auto it = range.first; it != range.second; ++it) {
+                const Trait& t = traits[it->second];
+                if (t.ns.kind == NsKind::Public && t.ns.uri.empty() && (t.kind == Trait::Kind::Method || t.kind == Trait::Kind::Accessor)) return &t;
+            }
         }
     }
     return best;
@@ -280,8 +293,9 @@ void VM::throwError(const std::string& cls, const std::string& message) {
 
 // ------------------------------------------------------------------ loading
 
-void VM::loadAbc(const Code& bytes, const std::string& name) {
+void VM::loadAbc(const Code& bytes, const std::string& name, int domain) {
     auto abc = parseAbc(*bytes, name);
+    abc->domain = domain;
     for (std::uint32_t i = 0; i < abc->scripts.size(); ++i) {
         const auto scriptIndex = static_cast<int>(scripts_.size());
         ScriptEntry e;
@@ -293,6 +307,7 @@ void VM::loadAbc(const Code& bytes, const std::string& name) {
             Definition d;
             d.ns = mn.nss.empty() ? Namespace::pub() : mn.nss[0];
             d.script = scriptIndex;
+            d.domain = domain;
             definitions_.emplace(mn.name, d);
         }
     }
@@ -321,19 +336,41 @@ void VM::initScript(std::size_t index) {
     }
 }
 
-ObjectPtr VM::findDefinition(const Multiname& mn, bool strict) {
+ObjectPtr VM::findDefinition(const Multiname& mn, bool strict, int domain) {
+    if (domain < 0) domain = currentDomain_;
     auto range = definitions_.equal_range(mn.name);
-    for (auto it = range.first; it != range.second; ++it) {
-        const Definition& d = it->second;
-        if (!nsMatches(d.ns, mn.nss)) continue;
-        if (d.script >= 0) {
-            initScript(static_cast<std::size_t>(d.script));
-            return scripts_[static_cast<std::size_t>(d.script)].global;
+    // Parent (domain 0: runtime + entry SWF) first, then the caller's own domain.
+    for (int pass = 0; pass < 2; ++pass) {
+        const int want = pass == 0 ? 0 : domain;
+        if (pass == 1 && domain == 0) break;
+        const Definition* found = nullptr;
+        std::size_t foundScript = 0;
+        for (auto it = range.first; it != range.second; ++it) {
+            const Definition& d = it->second;
+            if (d.domain != want || !nsMatches(d.ns, mn.nss)) continue;
+            // unordered_multimap order is unspecified: the lowest script index (load order) wins.
+            if (!found || (d.script >= 0 && static_cast<std::size_t>(d.script) < foundScript)) {
+                found = &d;
+                foundScript = d.script >= 0 ? static_cast<std::size_t>(d.script) : 0;
+            }
+        }
+        if (!found) continue;
+        if (found->script >= 0) {
+            initScript(static_cast<std::size_t>(found->script));
+            return scripts_[static_cast<std::size_t>(found->script)].global;
         }
         return toplevel;
     }
     (void)strict;
     return nullptr;
+}
+
+ClassPtr VM::findClassIn(const std::string& qualifiedName, int domain) {
+    const int saved = currentDomain_;
+    currentDomain_ = domain;
+    auto c = findClass(qualifiedName);
+    currentDomain_ = saved;
+    return c;
 }
 
 ClassPtr VM::findClass(const std::string& qualifiedName) {
@@ -594,6 +631,10 @@ std::string VM::toString(const Value& v) {
 
 Value VM::toPrimitive(const Value& v, bool preferString) {
     if (!v.isObject()) return v;
+    {
+        Value native;
+        if (v.o->nativePrimitive(*this, native)) return native;
+    }
     if (auto a = std::dynamic_pointer_cast<ArrayObject>(v.o)) {
         std::string out;
         for (std::size_t i = 0; i < a->items.size(); ++i) {
@@ -820,6 +861,10 @@ Value VM::getProperty(const Value& obj, const Multiname& mn, const Value* key) {
     Value receiver;
     const TraitTable* traits = traitsOf(obj, &holder, &receiver);
     if (traits) if (const Trait* t = traits->find(m)) return getFromTraits(holder, *t, receiver);
+    if (obj.isObject()) {
+        Value native;
+        if (obj.o->nativeGet(*this, m, key, native)) return native;
+    }
     if (!m.hasPublic() && !key) {
         // Non-public names only resolve through traits.
     }
@@ -869,6 +914,7 @@ void VM::setProperty(const Value& obj, const Multiname& mn, const Value& v, bool
         if (i >= 0) d->entries[static_cast<std::size_t>(i)].second = v;
         else if (!o->traits || !o->traits->find(m)) { d->entries.emplace_back(k, v); return; }
     }
+    if (!(o->traits && o->traits->find(m)) && o->nativeSet(*this, m, key, v)) return;
     if (o->traits) {
         if (const Trait* t = o->traits->find(m)) {
             switch (t->kind) {
@@ -910,6 +956,7 @@ bool VM::hasProperty(const Value& obj, const Multiname& mn, const Value* key) {
     Multiname m = mn;
     if (key) m.name = toString(*key);
     if (obj.o->traits && obj.o->traits->find(m)) return true;
+    if (obj.o->nativeHas(*this, m, key)) return true;
     for (Object* o = obj.o.get(); o; o = o->proto.get()) if (o->dynamic.find(m.name)) return true;
     return false;
 }
@@ -974,6 +1021,11 @@ void VM::reportError(const char* where, const ScriptException& e) {
         msg = "<error>";
     }
     std::cerr << "AVM2 uncaught (" << where << "): " << msg << "\n";
+    static const bool traceStack = std::getenv("FP_TRACE_STACK") != nullptr;
+    if (traceStack) {
+        for (std::size_t i = errorStack_.size(), n = 0; i-- > 0 && n < 8; ++n) std::cerr << "    at " << errorStack_[i] << "\n";
+    }
+    errorStackFresh_ = true;
 }
 
 // ------------------------------------------------------------------ decoding
@@ -1070,6 +1122,21 @@ Value VM::execute(AbcFile& abc, MethodBody& body, const Value& thisv, Args& args
     if (!body.decoded) decode(abc, body);
     if (gDepth > 400) throwError("Error", "Stack overflow");
     struct DepthGuard { DepthGuard() { ++gDepth; } ~DepthGuard() { --gDepth; } } guard;
+    // Name lookups made by this method resolve in the application domain of its ABC block.
+    struct DomainGuard {
+        int& slot;
+        int saved;
+        DomainGuard(int& s, int d) : slot(s), saved(s) { slot = d; }
+        ~DomainGuard() { slot = saved; }
+    } domainGuard(currentDomain_, abc.domain);
+    struct StackGuard {
+        VM& vm;
+        StackGuard(VM& v, std::string n) : vm(v) { vm.callStack_.push_back(std::move(n)); }
+        ~StackGuard() {
+            if (std::uncaught_exceptions() > 0 && vm.errorStackFresh_) { vm.errorStack_ = vm.callStack_; vm.errorStackFresh_ = false; }
+            vm.callStack_.pop_back();
+        }
+    } stackGuard(*this, (declaring ? declaring->name + "." : std::string()) + info.name);
 
     std::vector<Value> locals(std::max<std::size_t>(body.localCount, info.paramCount + 2));
     locals[0] = thisv;
@@ -1214,6 +1281,11 @@ Value VM::execute(AbcFile& abc, MethodBody& body, const Value& thisv, Args& args
                         Value result;
                         if (obj.isObject() && idx > 0) {
                             std::size_t i = static_cast<std::size_t>(idx - 1);
+                            std::vector<Value> nativeItems;
+                            if (obj.o->nativeItems(*this, nativeItems)) {
+                                if (i < nativeItems.size()) result = in.op == 0x1e ? Value(std::to_string(i)) : nativeItems[i];
+                                goto pushed;
+                            }
                             if (auto a = std::dynamic_pointer_cast<ArrayObject>(obj.o)) {
                                 if (i < a->items.size()) { result = in.op == 0x1e ? Value(std::to_string(i)) : a->items[i]; goto pushed; }
                                 i -= a->items.size();
@@ -1236,6 +1308,8 @@ Value VM::execute(AbcFile& abc, MethodBody& body, const Value& thisv, Args& args
                             if (!obj.isObject()) return 0;
                             std::size_t total = 0;
                             std::vector<bool> alive;
+                            std::vector<Value> nativeItems;
+                            if (obj.o->nativeItems(*this, nativeItems)) alive.assign(nativeItems.size(), true);
                             if (auto a = std::dynamic_pointer_cast<ArrayObject>(obj.o)) { for (auto& v : a->items) { (void)v; alive.push_back(true); } }
                             if (auto d = std::dynamic_pointer_cast<DictionaryObject>(obj.o)) for (std::size_t k = 0; k < d->entries.size(); ++k) alive.push_back(true);
                             for (const auto& e : obj.o->dynamic.entries) alive.push_back(e.alive);
@@ -1381,7 +1455,14 @@ Value VM::execute(AbcFile& abc, MethodBody& body, const Value& thisv, Args& args
                         stack.emplace_back(newClass(abc, static_cast<std::uint32_t>(in.a), b, scope));
                         break;
                     }
-                    case 0x59: throwError("Error", "E4X descendants are not supported");
+                    case 0x59: { // getdescendants
+                        const auto& mn = abc.multinames[static_cast<std::size_t>(in.a)];
+                        Value obj = pop();
+                        Value out;
+                        if (!obj.isObject() || !obj.o->nativeDescendants(*this, mn, out)) throwError("TypeError", "descendants of a non-XML value");
+                        stack.push_back(out);
+                        break;
+                    }
                     case 0x5a: { // newcatch
                         const auto& ex = body.exceptions[static_cast<std::size_t>(in.a)];
                         auto table = std::make_shared<TraitTable>();

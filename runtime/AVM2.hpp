@@ -169,6 +169,13 @@ struct Object : std::enable_shared_from_this<Object> {
     bool isDynamic = true;
     virtual ~Object() = default;
     virtual bool isFunction() const { return false; }
+    // Native property protocol (E4X XML / XMLList): consulted after the declared traits.
+    virtual bool nativeGet(VM&, const Multiname&, const Value* /*key*/, Value& /*out*/) { return false; }
+    virtual bool nativeSet(VM&, const Multiname&, const Value* /*key*/, const Value& /*v*/) { return false; }
+    virtual bool nativeHas(VM&, const Multiname&, const Value* /*key*/) { return false; }
+    virtual bool nativePrimitive(VM&, Value& /*out*/) { return false; }
+    virtual bool nativeItems(VM&, std::vector<Value>& /*out*/) { return false; } // for each enumeration
+    virtual bool nativeDescendants(VM&, const Multiname&, Value& /*out*/) { return false; }
 };
 
 struct ArrayObject : Object {
@@ -261,6 +268,7 @@ struct InstanceInfo {
 
 struct AbcFile {
     std::string name;
+    int domain = 0; // application domain this block was loaded into (0 = the entry SWF and the runtime)
     std::vector<std::int32_t> ints;
     std::vector<std::uint32_t> uints;
     std::vector<double> doubles;
@@ -294,7 +302,12 @@ public:
     Player& player;
 
     // Loading
-    void loadAbc(const Code& bytes, const std::string& name);
+    // Loads a DoABC block into an application domain. A class name defined in domain 0 shadows the
+    // same name in a child domain (parent first, like the Flash Player); sibling domains are separate.
+    void loadAbc(const Code& bytes, const std::string& name, int domain = 0);
+    int newDomain() { return ++domainCounter_; }
+    int currentDomain() const { return currentDomain_; }
+    ClassPtr findClassIn(const std::string& qualifiedName, int domain);
     ClassPtr findClass(const std::string& qualifiedName); // "flash.display::MovieClip", "IPFI"
 
     // Object model
@@ -387,6 +400,7 @@ private:
     };
     struct Definition {
         Namespace ns;
+        int domain = 0;
         int script = -1;    // index into scripts_
         Value value;        // natives
     };
@@ -399,7 +413,11 @@ private:
     Value execute(AbcFile& abc, MethodBody& body, const Value& thisv, Args& args, const std::vector<ObjectPtr>* scope,
                   Class* declaring, const MethodInfo& info);
     void decode(AbcFile& abc, MethodBody& body);
-    ObjectPtr findDefinition(const Multiname& mn, bool strict);
+    ObjectPtr findDefinition(const Multiname& mn, bool strict, int domain = -1);
+    int currentDomain_ = 0, domainCounter_ = 0;
+    std::vector<std::string> callStack_;  // "Class.method" of the running AS3 methods (for error reports)
+    std::vector<std::string> errorStack_; // callStack_ at the deepest frame the last exception unwound
+    bool errorStackFresh_ = true;
     void initScript(std::size_t index);
     ClassPtr newClass(AbcFile& abc, std::uint32_t index, const ClassPtr& base, const std::vector<ObjectPtr>& scope);
     void buildTraits(AbcFile& abc, const std::vector<TraitInfo>& infos, TraitTable& table, Class* declaring);
@@ -417,6 +435,7 @@ void installBuiltinsImpl(VM& vm);
 void installFlashImpl(VM& vm);
 
 // Bridge used by the display runtime (AVM2Flash.cpp).
+void installXml(VM& vm); // AVM2Xml.cpp: the XML and XMLList classes
 void as3Start(Player& player);                                 // document class + root
 void as3Step(Player& player);                                  // one frame
 void as3PreAllocate(Player& player, DisplayObject& obj);        // before timeline content is built

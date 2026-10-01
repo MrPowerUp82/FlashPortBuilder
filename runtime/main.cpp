@@ -2,6 +2,7 @@
 #include "FlashRuntime.hpp"
 #include "GameMetadata.hpp"
 #include <algorithm>
+#include <filesystem>
 #include <cstdio>
 #include <cstdlib>
 #include <iostream>
@@ -84,6 +85,12 @@ void dumpClip(const fp::Clip& clip, int indent, int maxDepth) {
         if (obj->clipDepth) std::cout << " mask->" << obj->clipDepth;
         if (obj->cxform.mul[3] != 1 || obj->cxform.add[3] != 0) std::cout << " alpha*" << obj->cxform.mul[3] << "+" << obj->cxform.add[3];
         if (obj->kind == fp::DisplayObject::Kind::Text) std::cout << " text=\"" << obj->text << "\"";
+        if (g_movie && std::getenv("FP_DUMP_BOUNDS")) {
+            // Bounds of the object in its parent's pixel space.
+            fp::Geometry geo(*g_movie);
+            float b[4];
+            if (geo.bounds(*obj, fp::Matrix{}, b)) std::printf(" bounds=[%.0f,%.0f %.0f,%.0f]", b[0] / 20, b[1] / 20, b[2] / 20, b[3] / 20);
+        }
         if (obj->kind == fp::DisplayObject::Kind::Shape && g_movie && std::getenv("FP_DUMP_BUTTONS")) {
             std::size_t tris = 0;
             if (auto it = g_movie->shapes.find(obj->character); it != g_movie->shapes.end()) for (const auto& m : it->second.meshes) tris += m.indices.size() / 3;
@@ -180,9 +187,16 @@ int main(int argc, char** argv) {
     player->ignoreStops = opts.ignoreStops;
     player->virtualClock = capturing;
     player->audio.open(!capturing);
+    player->dataRoot = (std::filesystem::path(opts.pack).parent_path() / "data").string();
     if (!opts.audioOut.empty()) player->audio.record();
     player->start();
     fp::Renderer renderer(sdl, movie, W, H);
+    const auto bindRenderer = [&renderer](fp::Player& p) {
+        p.renderObject = [&renderer](const fp::DisplayObject& o, const fp::Matrix& m, int w, int h, std::vector<std::uint32_t>& out) {
+            return renderer.renderToPixels(o, m, w, h, out);
+        };
+    };
+    bindRenderer(*player);
     // Stage coordinates (twips, origin at the frame rect) -> window pixels.
     const fp::Matrix stageMatrix{1.0f / 20, 0, 0, 1.0f / 20, -movie.stage[0] / 20.0f, -movie.stage[2] / 20.0f};
 
@@ -282,6 +296,8 @@ int main(int argc, char** argv) {
                                 viewClip.reset();
                                 player = std::make_unique<fp::Player>(movie);
                                 player->audio.open(!capturing);
+    player->dataRoot = (std::filesystem::path(opts.pack).parent_path() / "data").string();
+                                bindRenderer(*player);
                                 player->start();
                                 break;
                             case SDLK_F5: player->ignoreStops = !player->ignoreStops; if (player->root && player->ignoreStops) player->root->setPlaying(true); break;

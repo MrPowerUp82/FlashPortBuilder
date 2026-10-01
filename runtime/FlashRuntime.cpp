@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <functional>
 #include <iostream>
@@ -63,6 +64,7 @@ struct SlotState {
     Matrix matrix;
     ColorTransform cxform;
     std::uint16_t clipDepth{}, ratio{};
+    std::uint8_t blendMode = 0;
     std::string name;
     bool visible = true;
     std::vector<ClipActionDef> clipActions;
@@ -76,6 +78,7 @@ void applyProperties(T& target, const PlaceCmd& cmd, bool keepTransform) {
     if (cmd.flags & 0x20) target.ratio = cmd.ratio;
     if (cmd.flags & 0x40) target.name = cmd.name;
     if (cmd.flags & 0x80) target.visible = false;
+    if (cmd.flags2 & 0x01) target.blendMode = cmd.blend;
 }
 
 void unionRect(float out[4], bool& any, float x0, float y0, float x1, float y1) {
@@ -105,7 +108,7 @@ bool Movie::load(const std::string& path, std::string& error) {
         if (!f) throw std::runtime_error("cannot open " + path);
         Reader r(std::vector<std::uint8_t>(std::istreambuf_iterator<char>(f), {}));
         if (r.u8() != 'F' || r.u8() != 'P' || r.u8() != 'K' || r.u8() != '1') throw std::runtime_error("not a FlashPort movie pack");
-        if (r.u32() != 6) throw std::runtime_error("unsupported movie pack version (rebuild with this FlashPortBuilder)");
+        if (r.u32() != 7) throw std::runtime_error("unsupported movie pack version (rebuild with this FlashPortBuilder)");
         for (auto& v : stage) v = r.i32();
         fps = r.f32();
         if (!(fps > 0 && fps < 240)) fps = 24;
@@ -178,12 +181,14 @@ bool Movie::load(const std::string& path, std::string& error) {
                     c.depth = r.u16();
                     if (c.type != 1) continue;
                     c.flags = r.u8();
+                    c.flags2 = r.u8();
                     if (c.flags & 0x01) c.character = r.u16();
                     if (c.flags & 0x02) c.matrix = r.matrix();
                     if (c.flags & 0x04) c.cxform = r.cxform();
                     if (c.flags & 0x10) c.clipDepth = r.u16();
                     if (c.flags & 0x20) c.ratio = r.u16();
                     if (c.flags & 0x40) c.name = r.str();
+                    if (c.flags2 & 0x01) c.blend = r.u8();
                     c.clipActions.resize(r.count(9));
                     for (auto& ca : c.clipActions) {
                         ca.events = r.u32();
@@ -640,6 +645,7 @@ void Clip::seek(int frame) {
         }
         obj->clipDepth = s.clipDepth;
         obj->ratio = s.ratio;
+        obj->blendMode = s.blendMode;
         obj->name = s.name;
         obj->visible = s.visible;
         next[depth] = std::move(obj);
@@ -709,6 +715,84 @@ void Clip::advance(std::uint64_t tickId) {
         for (auto& bc : obj->buttonClips) if (bc) clips.push_back(bc.get());
     }
     for (Clip* c : clips) c->advance(tickId);
+}
+
+int Movie::domainOf(std::uint32_t character) const {
+    int domain = 0;
+    for (const auto& [base, d] : domainBases) {
+        if (character >= base) domain = d;
+        else break;
+    }
+    return domain;
+}
+
+int Movie::mergeLoaded(Movie&& src, int domain) {
+    // Highest character id in use here and in the source.
+    auto maxKey = [](const auto& m, std::uint32_t mask) {
+        std::uint32_t best = 0;
+        for (const auto& [k, v] : m) {
+            (void)v;
+            const std::uint32_t id = k & mask;
+            if (id < 0x10000) best = std::max(best, id);
+        }
+        return best;
+    };
+    auto maxId = [&](const Movie& m) {
+        std::uint32_t best = 0;
+        best = std::max({best, maxKey(m.timelines, 0xffff), maxKey(m.buttons, 0xffff), maxKey(m.fonts, 0xffff),
+                         maxKey(m.editTexts, 0xffff), maxKey(m.shapes, 0xffff), maxKey(m.bitmaps, 0xffffffff),
+                         maxKey(m.sounds, 0xffffffff)});
+        for (const auto& [id, name] : m.symbols) { (void)name; if (id < 0x10000) best = std::max(best, id); }
+        return best;
+    };
+    const std::uint32_t base = maxId(*this) + 1;
+    const std::uint32_t srcMax = maxId(src);
+    if (base + srcMax >= 0xfff0) return -1;
+
+    // Gradient textures (ids >= 0x10000) are renumbered after the ones already here.
+    std::uint32_t gradMax = 0xffff;
+    for (const auto& [id, b] : bitmaps) { (void)b; if (id >= 0x10000) gradMax = std::max(gradMax, id); }
+    const std::uint32_t gradShift = gradMax + 1 - 0x10000;
+    auto texId = [&](std::uint32_t id) { return id >= 0x10000 ? id + gradShift : id + base; };
+    auto soundId = [&](std::uint32_t id) {
+        if (!id) return id;
+        return id >= 0x10000 ? 0x10000 + (id - 0x10000 + base) : id + base; // streams: 0x10000 + timeline id
+    };
+    auto charId = [&](std::uint32_t id) { return id + base; };
+
+    for (auto& [id, b] : src.bitmaps) bitmaps.emplace(texId(id), std::move(b));
+    for (auto& [id, s] : src.sounds) sounds.emplace(soundId(id), std::move(s));
+    for (auto& [key, sh] : src.shapes) {
+        for (auto& m : sh.meshes) if (m.texture >= 0) m.texture = static_cast<std::int32_t>(texId(static_cast<std::uint32_t>(m.texture)));
+        shapes.emplace(charId(key & 0xffff) | (key & 0xffff0000u), std::move(sh));
+    }
+    for (auto& [id, ratios] : src.morphRatios) morphRatios.emplace(static_cast<std::uint16_t>(charId(id)), std::move(ratios));
+    for (auto& [id, tl] : src.timelines) {
+        for (auto& fr : tl.frames) {
+            for (auto& c : fr.cmds) {
+                if (c.type == 1 && (c.flags & 0x01)) c.character = static_cast<std::uint16_t>(charId(c.character));
+            }
+            for (auto& s : fr.initScripts) s.first = static_cast<std::uint16_t>(charId(s.first));
+            for (auto& s : fr.sounds) s.first = soundId(s.first);
+        }
+        timelines.emplace(charId(id), std::move(tl)); // the main timeline (0) becomes character `base`
+    }
+    for (auto& [id, b] : src.buttons) {
+        for (auto& rec : b.records) rec.character = static_cast<std::uint16_t>(charId(rec.character));
+        for (auto& s : b.sound) s = soundId(s);
+        buttons.emplace(charId(id), std::move(b));
+    }
+    for (auto& [id, f] : src.fonts) fonts.emplace(charId(id), std::move(f));
+    for (auto& [id, t] : src.editTexts) {
+        if (t.font) t.font = static_cast<std::uint16_t>(charId(t.font));
+        editTexts.emplace(charId(id), std::move(t));
+    }
+    for (auto& [id, name] : src.symbols) {
+        symbols.emplace_back(charId(id), name);
+        exports.emplace(name, static_cast<std::uint16_t>(charId(id)));
+    }
+    domainBases.emplace_back(base, domain);
+    return static_cast<int>(base);
 }
 
 const ShapeDef* Movie::shape(std::uint16_t character, std::uint16_t ratio) const {
@@ -859,6 +943,86 @@ Player::~Player() {
     as3Pressed.reset();
     vm.reset();
     vm2.reset();
+}
+
+namespace {
+
+std::string normaliseUrl(std::string u) {
+    for (const char* scheme : {"file:///", "file://"}) {
+        if (u.rfind(scheme, 0) == 0) { u = u.substr(std::strlen(scheme)); break; }
+    }
+    if (auto p = u.find("://"); p != std::string::npos) {
+        auto slash = u.find('/', p + 3);
+        u = slash == std::string::npos ? std::string() : u.substr(slash + 1);
+    }
+    if (auto q = u.find_first_of("?#"); q != std::string::npos) u.resize(q);
+    for (auto& c : u) c = c == '\\' ? '/' : static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    while (u.rfind("./", 0) == 0) u = u.substr(2);
+    while (u.rfind("../", 0) == 0) u = u.substr(3);
+    return u;
+}
+
+} // namespace
+
+// Finds a bundled file for a script URL: the exact relative path first, then the path with its
+// leading directories removed one by one (absolute and http URLs end up here). `canon` is the
+// matched relative path without the suffix.
+bool Player::resolveData(const std::string& url, const char* suffix, std::string& path, std::string& canon) {
+    namespace fs = std::filesystem;
+    if (dataIndex.empty() && !dataRoot.empty()) {
+        std::error_code ec;
+        for (fs::recursive_directory_iterator it(dataRoot, ec), end; !ec && it != end; it.increment(ec)) {
+            if (!it->is_regular_file()) continue;
+            auto rel = fs::relative(it->path(), dataRoot, ec).generic_string();
+            for (auto& c : rel) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            dataIndex.emplace(rel, it->path().string());
+        }
+        if (dataIndex.empty()) dataIndex.emplace("", "");
+    }
+    std::string key = normaliseUrl(url);
+    while (true) {
+        if (auto it = dataIndex.find(key + suffix); it != dataIndex.end() && !it->second.empty()) {
+            path = it->second;
+            canon = key;
+            return true;
+        }
+        const auto slash = key.find('/');
+        if (slash == std::string::npos) return false;
+        key = key.substr(slash + 1);
+    }
+}
+
+bool Player::readDataFile(const std::string& url, std::vector<std::uint8_t>& out) {
+    std::string path, canon;
+    if (!resolveData(url, "", path, canon)) return false;
+    std::ifstream f(path, std::ios::binary);
+    if (!f) return false;
+    out.assign(std::istreambuf_iterator<char>(f), {});
+    return true;
+}
+
+bool Player::loadSwf(const std::string& url, int domain, LoadedSwf& out, std::string& error) {
+    std::string path, canon;
+    if (!resolveData(url, ".pack", path, canon)) {
+        error = "no bundled pack for " + url;
+        return false;
+    }
+    if (auto it = loadedSwfs.find(canon); it != loadedSwfs.end()) { out = it->second; return true; }
+    Movie src;
+    if (!src.load(path, error)) return false;
+    const int dom = domain >= 0 ? domain : (vm2 ? vm2->newDomain() : 0);
+    auto blocks = src.abcBlocks;
+    const int base = movieRw().mergeLoaded(std::move(src), dom);
+    if (base < 0) { error = "too many characters"; return false; }
+    if (vm2) {
+        for (const auto& b : blocks) {
+            try { vm2->loadAbc(b.bytes, b.name, dom); }
+            catch (const std::exception& e) { std::cerr << "ABC block '" << b.name << "' failed to load: " << e.what() << "\n"; }
+        }
+    }
+    out = {base, dom};
+    loadedSwfs[canon] = out;
+    return true;
 }
 
 double Player::timeMs() const {
@@ -1210,6 +1374,11 @@ void Player::as3Mouse(bool moved, int buttonChange) {
     bool any = false;
     DisplayObject* target = as3HitTest(*root, Matrix{}, mouseX * 20, mouseY * 20, any);
     if (!target && any) target = rootHolder.get();
+    if (buttonChange == 1 && std::getenv("FP_TRACE_HIT")) {
+        std::fprintf(stderr, "[hit] (%.0f,%.0f):", mouseX, mouseY);
+        for (DisplayObject* d = target; d; d = d->parent ? d->parent->holder() : nullptr) std::fprintf(stderr, " <%s#%u", d->name.c_str(), unsigned(d->character));
+        std::fprintf(stderr, "\n");
+    }
     std::shared_ptr<DisplayObject> hit = target ? target->shared_from_this() : nullptr;
     if (hit != as3Hover) {
         auto old = as3Hover;
@@ -1289,9 +1458,29 @@ SDL_Texture* Renderer::texture(std::int32_t id) {
     return b.texture;
 }
 
+// SWF blend modes expressed as SDL blend factors. Modes SDL cannot express (difference, overlay,
+// hard light, invert, alpha, erase) draw as normal.
+SDL_BlendMode Renderer::blendFor(std::uint8_t mode) {
+    const auto keepAlpha = [](SDL_BlendFactor sf, SDL_BlendFactor df, SDL_BlendOperation op) {
+        return SDL_ComposeCustomBlendMode(sf, df, op, SDL_BLENDFACTOR_ZERO, SDL_BLENDFACTOR_ONE, SDL_BLENDOPERATION_ADD);
+    };
+    switch (mode) {
+        case 3: return SDL_ComposeCustomBlendMode(SDL_BLENDFACTOR_DST_COLOR, SDL_BLENDFACTOR_ONE_MINUS_SRC_ALPHA, SDL_BLENDOPERATION_ADD,
+                                                  SDL_BLENDFACTOR_ZERO, SDL_BLENDFACTOR_ONE, SDL_BLENDOPERATION_ADD); // multiply
+        case 4: return keepAlpha(SDL_BLENDFACTOR_SRC_ALPHA, SDL_BLENDFACTOR_ONE_MINUS_SRC_COLOR, SDL_BLENDOPERATION_ADD); // screen
+        case 5: return keepAlpha(SDL_BLENDFACTOR_ONE, SDL_BLENDFACTOR_ONE, SDL_BLENDOPERATION_MAXIMUM);                    // lighten
+        case 6: return keepAlpha(SDL_BLENDFACTOR_ONE, SDL_BLENDFACTOR_ONE, SDL_BLENDOPERATION_MINIMUM);                    // darken
+        case 8: return keepAlpha(SDL_BLENDFACTOR_SRC_ALPHA, SDL_BLENDFACTOR_ONE, SDL_BLENDOPERATION_ADD);                  // add
+        case 9: return keepAlpha(SDL_BLENDFACTOR_SRC_ALPHA, SDL_BLENDFACTOR_ONE, SDL_BLENDOPERATION_REV_SUBTRACT);         // subtract
+        default: return SDL_BLENDMODE_BLEND;
+    }
+}
+
 void Renderer::drawShape(const ShapeDef& shape, const Matrix& m, const ColorTransform& cx) {
     for (const auto& mesh : shape.meshes) {
         SDL_Texture* tex = nullptr;
+        // Fully transparent fills only exist as hit areas.
+        if (mesh.texture < 0 && !mesh.vertices.empty() && mesh.vertices[0].rgba[3] == 0 && cx.add[3] <= 0) continue;
         if (mesh.texture >= 0 && !(tex = texture(mesh.texture))) continue;
         scratch_.resize(mesh.vertices.size());
         for (std::size_t i = 0; i < mesh.vertices.size(); ++i) {
@@ -1309,7 +1498,8 @@ void Renderer::drawShape(const ShapeDef& shape, const Matrix& m, const ColorTran
             o.tex_coord.y = std::clamp(v.v, 0.0f, 1.0f);
         }
         // Untextured geometry uses the renderer's draw blend mode, which defaults to NONE (alpha ignored).
-        if (!tex) SDL_SetRenderDrawBlendMode(sdl_, SDL_BLENDMODE_BLEND);
+        if (!tex) SDL_SetRenderDrawBlendMode(sdl_, activeBlend_);
+        else SDL_SetTextureBlendMode(tex, activeBlend_);
         SDL_RenderGeometry(sdl_, tex, scratch_.data(), static_cast<int>(scratch_.size()), mesh.indices.data(),
                            static_cast<int>(mesh.indices.size()));
         trianglesDrawn += mesh.indices.size() / 3;
@@ -1341,7 +1531,42 @@ void Renderer::drawObject(const DisplayObject& obj, const Matrix& m, const Color
     if (!obj.visible || obj.clipDepth > 0) return; // masks are drawn by drawMasked
     const ColorTransform c = cx * obj.cxform;
     if (c.mul[3] <= 0 && c.add[3] <= 0) return; // fully transparent subtree
+    if (obj.blendMode > 1) {
+        const SDL_BlendMode saved = activeBlend_;
+        activeBlend_ = blendFor(obj.blendMode);
+        drawCharacter(obj.character, obj.clip.get(), &obj, m * obj.matrix, c);
+        activeBlend_ = saved;
+        return;
+    }
     drawCharacter(obj.character, obj.clip.get(), &obj, m * obj.matrix, c);
+}
+
+bool Renderer::renderToPixels(const DisplayObject& obj, const Matrix& m, int w, int h, std::vector<std::uint32_t>& out) {
+    if (w <= 0 || h <= 0 || w > 4096 || h > 4096) return false;
+    SDL_Texture* tex = SDL_CreateTexture(sdl_, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_TARGET, w, h);
+    if (!tex) return false;
+    SDL_Texture* previous = SDL_GetRenderTarget(sdl_);
+    SDL_SetRenderTarget(sdl_, tex);
+    SDL_SetRenderDrawBlendMode(sdl_, SDL_BLENDMODE_NONE);
+    SDL_SetRenderDrawColor(sdl_, 0, 0, 0, 0);
+    SDL_RenderClear(sdl_);
+    const int savedDepth = layerDepth_;
+    layerDepth_ = 99; // masks fall back to unmasked drawing: the layer textures have the stage's size
+    drawCharacter(obj.character, obj.clip.get(), &obj, m, ColorTransform{});
+    layerDepth_ = savedDepth;
+    out.assign(static_cast<std::size_t>(w) * h, 0);
+    const bool ok = SDL_RenderReadPixels(sdl_, nullptr, SDL_PIXELFORMAT_ARGB8888, out.data(), w * 4) == 0;
+    SDL_SetRenderTarget(sdl_, previous);
+    SDL_DestroyTexture(tex);
+    if (!ok) return false;
+    for (auto& px : out) { // premultiplied (alpha-blended onto transparent) -> straight alpha
+        const unsigned a = px >> 24;
+        if (a == 0) { px = 0; continue; }
+        if (a == 255) continue;
+        auto un = [a](unsigned c) { return std::min(255u, (c * 255u + a / 2) / a); };
+        px = (a << 24) | (un((px >> 16) & 0xff) << 16) | (un((px >> 8) & 0xff) << 8) | un(px & 0xff);
+    }
+    return true;
 }
 
 void Renderer::drawClip(const Clip& clip, const Matrix& m, const ColorTransform& cx) {
@@ -1517,7 +1742,7 @@ void Renderer::drawText(const EditTextDef& def, const std::string& text, const M
     std::uint8_t* out = &color.r;
     for (int k = 0; k < 4; ++k) out[k] = static_cast<std::uint8_t>(std::clamp(base[k] * cx.mul[k] + cx.add[k], 0.0f, 255.0f));
     if (color.a == 0) return;
-    SDL_SetRenderDrawBlendMode(sdl_, SDL_BLENDMODE_BLEND);
+    SDL_SetRenderDrawBlendMode(sdl_, activeBlend_);
 
     float baseline = def.bounds[1] + 40.0f + ascent;
     for (const auto& line : lines) {

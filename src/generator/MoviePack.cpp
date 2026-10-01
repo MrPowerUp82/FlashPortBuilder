@@ -22,7 +22,7 @@
 namespace flashport {
 namespace {
 
-constexpr std::uint32_t kPackVersion = 6;
+constexpr std::uint32_t kPackVersion = 7;
 constexpr std::uint32_t kGradientTextureBase = 0x10000; // above any SWF character id
 
 class PackWriter {
@@ -655,14 +655,17 @@ void writeMoviePack(const SWFDocument& doc, const std::string& path, MoviePackRe
                 if (p.ratio) flags |= 0x20;
                 if (p.name) flags |= 0x40;
                 if (p.visible && !*p.visible) flags |= 0x80;
+                const bool blend = p.blendMode && *p.blendMode > 1; // 0/1 = normal
                 w.u16(p.depth);
                 w.u8(flags);
+                w.u8(blend ? 0x01 : 0);
                 if (p.characterId) w.u16(*p.characterId);
                 if (p.matrix) w.matrix(*p.matrix);
                 if (p.colorTransform) w.cxform(*p.colorTransform);
                 if (p.clipDepth) w.u16(*p.clipDepth);
                 if (p.ratio) w.u16(*p.ratio);
                 if (p.name) w.str(*p.name);
+                if (blend) w.u8(*p.blendMode);
                 w.u32(static_cast<std::uint32_t>(p.clipActions.size()));
                 for (const auto& ca : p.clipActions) {
                     w.u32(ca.events);

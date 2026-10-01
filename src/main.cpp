@@ -212,7 +212,26 @@ int main(int argc, char** argv) {
         }
 
         if (argc < 3) { printUsage(); return 2; }
-        const std::string input = argv[2];
+        std::string input = argv[2];
+
+        // A directory is a multi-file game: the entry SWF (launcher.swf, or --entry name.swf) is the
+        // game, and every other file is bundled under data/ for the entry to load at run time.
+        std::filesystem::path bundleDir;
+        if (command == "build" && std::filesystem::is_directory(input)) {
+            bundleDir = input;
+            std::string entryName = "launcher.swf";
+            for (int i = 3; i + 1 < argc; ++i) if (std::string(argv[i]) == "--entry") entryName = argv[i + 1];
+            std::filesystem::path entry = bundleDir / entryName;
+            if (!std::filesystem::exists(entry)) {
+                std::vector<std::filesystem::path> swfs;
+                for (const auto& e : std::filesystem::directory_iterator(bundleDir)) {
+                    if (e.is_regular_file() && e.path().extension() == ".swf") swfs.push_back(e.path());
+                }
+                if (swfs.size() != 1) throw std::runtime_error("cannot tell which SWF in " + input + " is the entry (use --entry <file.swf>)");
+                entry = swfs.front();
+            }
+            input = entry.string();
+        }
 
         if (command == "unpack") {
             const auto doc = loadSWFDocumentFile(input);
@@ -291,6 +310,32 @@ int main(int argc, char** argv) {
             writeMoviePack(gameDoc, (root / "movie.pack").string(), pack);
             const auto game = reader.analyzeBytes(gameDoc.data, gameDoc.sourceName);
             ProjectGenerator{}.generate(game, input, output, findRuntimeDir(argv[0]));
+            if (!bundleDir.empty()) {
+                // Every other file of the game folder: SWFs become packs, the rest is copied as is.
+                namespace fs = std::filesystem;
+                std::size_t swfCount = 0, fileCount = 0;
+                for (const auto& e : fs::recursive_directory_iterator(bundleDir)) {
+                    if (!e.is_regular_file()) continue;
+                    const auto rel = fs::relative(e.path(), bundleDir);
+                    const auto dst = root / "data" / rel;
+                    fs::create_directories(dst.parent_path());
+                    if (e.path().extension() == ".swf") {
+                        SWFDocument inner;
+                        forEachSWF(loadSWFDocumentFile(e.path().string()), "", [&](const SWFDocument& d, const fs::path&) { inner = d; });
+                        MoviePackReport p;
+                        auto packPath = dst;
+                        packPath += ".pack";
+                        writeMoviePack(inner, packPath.string(), p);
+                        std::cout << "[data/" << rel.generic_string() << ".pack] " << p.shapes << " shapes, " << p.sounds << " sounds, "
+                                  << (p.packBytes / 1024) << " KB\n";
+                        ++swfCount;
+                    } else {
+                        fs::copy_file(e.path(), dst, fs::copy_options::overwrite_existing);
+                        ++fileCount;
+                    }
+                }
+                std::cout << "Bundled " << swfCount << " SWFs and " << fileCount << " other files under data/\n";
+            }
             std::cout << "\n";
             printDisasmReport(disasm, std::cout);
             printMoviePackReport(pack, std::cout);
