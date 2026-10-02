@@ -43,7 +43,7 @@ std::vector<ScriptedInput> parseInput(const std::string& spec) {
         in.tick = std::strtoull(item.substr(0, a).c_str(), nullptr, 10);
         in.kind = item.substr(a + 1, b - a - 1);
         const auto args = item.substr(b + 1);
-        if (in.kind == "click" || in.kind == "move") std::sscanf(args.c_str(), "%f,%f", &in.x, &in.y);
+        if (in.kind == "click" || in.kind == "move" || in.kind == "mdown" || in.kind == "mup") std::sscanf(args.c_str(), "%f,%f", &in.x, &in.y);
         else in.key = std::atoi(args.c_str());
         out.push_back(in);
     }
@@ -262,6 +262,8 @@ int main(int argc, char** argv) {
             if (in.tick != player->tick) continue;
             if (in.kind == "click") { player->mouseMove(in.x, in.y); player->mouseButton(true); player->mouseButton(false); }
             else if (in.kind == "move") player->mouseMove(in.x, in.y);
+            else if (in.kind == "mdown") { player->mouseMove(in.x, in.y); player->mouseButton(true); }
+            else if (in.kind == "mup") { player->mouseMove(in.x, in.y); player->mouseButton(false); }
             else if (in.kind == "down") player->keyEvent(in.key, true);
             else if (in.kind == "up") player->keyEvent(in.key, false);
             else if (in.kind == "key") { player->keyEvent(in.key, true); player->keyEvent(in.key, false); }

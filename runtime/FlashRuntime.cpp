@@ -1384,7 +1384,26 @@ DisplayObject* Player::as3HitTest(Clip& clip, const Matrix& m, float x, float y,
     return nullptr;
 }
 
+void Player::updateDrag() {
+    if (!dragObj) return;
+    Matrix inv;
+    const Matrix parent = dragObj->parent ? dragObj->parent->worldMatrix() : Matrix{};
+    if (!parent.invert(inv)) return;
+    float x, y;
+    inv.apply(mouseX * 20, mouseY * 20, x, y);
+    if (!dragLock) { x += dragOff[0]; y += dragOff[1]; }
+    if (dragBounded) {
+        x = std::clamp(x, dragRect[0] * 20, std::max(dragRect[0], dragRect[0] + dragRect[2]) * 20);
+        y = std::clamp(y, dragRect[1] * 20, std::max(dragRect[1], dragRect[1] + dragRect[3]) * 20);
+    }
+    dragObj->matrix.tx = x;
+    dragObj->matrix.ty = y;
+    dragObj->dynamicTransform = true;
+    dragObj->cachedTransform = false;
+}
+
 void Player::as3Mouse(bool moved, int buttonChange) {
+    updateDrag();
     bool any = false;
     DisplayObject* target = as3HitTest(*root, Matrix{}, mouseX * 20, mouseY * 20, any);
     if (!target && any) target = rootHolder.get();

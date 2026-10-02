@@ -331,6 +331,11 @@ struct Player {
     std::unique_ptr<avm1::VM> vm;  // AVM1 interpreter (null unless the movie runs AVM1 scripts)
     std::unique_ptr<avm2::VM> vm2; // AVM2 interpreter (null unless the movie runs ActionScript 3)
     std::shared_ptr<DisplayObject> rootHolder; // display object whose clip is `root` (AS3 needs one)
+    // startDrag(): the dragged object follows the mouse (AS3).
+    std::shared_ptr<DisplayObject> dragObj;
+    bool dragLock = false, dragBounded = false;
+    float dragOff[2] = {0, 0}, dragRect[4] = {0, 0, 0, 0}; // grab offset (twips); bounds (pixels, parent space)
+    void updateDrag();
     std::shared_ptr<DisplayObject> as3Hover, as3Pressed;
     bool keys[256] = {};
     int lastKey = 0;

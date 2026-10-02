@@ -1380,8 +1380,36 @@ void installFlashImpl(VM& vm) {
         .property("soundTransform", [](VM& vm, const Value&, Args&) { return vm.construct(Value(vm.findClass("flash.media::SoundTransform")), {}); },
                   [](VM&, const Value&, Args&) { return Value(); })
         .getter("dropTarget", [](VM&, const Value&, Args&) { return Value::null(); })
-        .method("startDrag", [](VM&, const Value&, Args&) { return Value(); })
-        .method("stopDrag", [](VM&, const Value&, Args&) { return Value(); });
+        .method("startDrag", [](VM& vm, const Value& s, Args& a) {
+            auto* d = disp(s);
+            if (!d) return Value();
+            Player& p = vm.player;
+            p.dragObj = d->shared_from_this();
+            p.dragLock = vm.toBoolean(arg(a, 0));
+            p.dragBounded = arg(a, 1).isObject();
+            if (p.dragBounded) {
+                const Value r = arg(a, 1);
+                p.dragRect[0] = float(vm.toNumber(vm.getPublic(r, "x")));
+                p.dragRect[1] = float(vm.toNumber(vm.getPublic(r, "y")));
+                p.dragRect[2] = float(vm.toNumber(vm.getPublic(r, "width")));
+                p.dragRect[3] = float(vm.toNumber(vm.getPublic(r, "height")));
+            }
+            // Keep the grab offset when the object is not centred on the mouse.
+            p.dragOff[0] = p.dragOff[1] = 0;
+            if (!p.dragLock) {
+                Matrix inv;
+                const Matrix parent = d->parent ? d->parent->worldMatrix() : Matrix{};
+                if (parent.invert(inv)) {
+                    float x, y;
+                    inv.apply(p.mouseX * 20, p.mouseY * 20, x, y);
+                    p.dragOff[0] = d->matrix.tx - x;
+                    p.dragOff[1] = d->matrix.ty - y;
+                }
+            }
+            p.updateDrag();
+            return Value();
+        })
+        .method("stopDrag", [](VM& vm, const Value&, Args&) { vm.player.dragObj.reset(); return Value(); });
 
     auto movieClip = vm.defineNativeClass("flash.display", "MovieClip", sprite);
     ClassBuilder mcb{vm, movieClip};
